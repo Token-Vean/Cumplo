@@ -1,0 +1,54 @@
+{
+  "title": "Preparar reunión de Junta Directiva",
+  "summary": "Plan básico para preparar, ejecutar y cerrar una reunión mensual.",
+  "category": "Reunión",
+  "difficulty": "media",
+  "estimated_total_time": "3-5 horas",
+  "tasks": [
+    {
+      "id": "ej_1",
+      "title": "Definir el orden del día",
+      "emoji": "📝",
+      "description": "Revisar asuntos pendientes, decisiones necesarias y puntos informativos.",
+      "estimated_time": "45 minutos",
+      "energy": "media",
+      "done": false,
+      "collapsed": false,
+      "subtasks": [
+        {
+          "id": "ej_1_1",
+          "title": "Revisar acuerdos anteriores",
+          "emoji": "🗂️",
+          "description": "Comprobar compromisos no cerrados.",
+          "estimated_time": "20 minutos",
+          "energy": "baja",
+          "done": false,
+          "collapsed": false,
+          "subtasks": []
+        }
+      ]
+    },
+    {
+      "id": "ej_2",
+      "title": "Preparar documentación de apoyo",
+      "emoji": "📁",
+      "description": "Reunir informes, datos económicos y documentos de decisión.",
+      "estimated_time": "90 minutos",
+      "energy": "alta",
+      "done": false,
+      "collapsed": false,
+      "subtasks": []
+    },
+    {
+      "id": "ej_3",
+      "title": "Convocar a los miembros",
+      "emoji": "✉️",
+      "description": "Enviar convocatoria oficial con orden del día y documentación.",
+      "estimated_time": "30 minutos",
+      "energy": "baja",
+      "done": false,
+      "collapsed": false,
+      "subtasks": []
+    }
+  ]
+}

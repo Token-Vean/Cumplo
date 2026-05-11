@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title data-i18n="app.title">Cumplø — Desglose local de tareas con Ollama</title>
+
+  <meta http-equiv="Content-Security-Policy" content="
+    default-src 'self';
+    script-src 'self';
+    style-src 'self';
+    img-src 'self' data:;
+    connect-src 'self' http://localhost:11434 http://127.0.0.1:11434;
+    font-src 'self';
+    form-action 'none';
+    frame-ancestors 'none';
+    base-uri 'self';
+    object-src 'none'">
+
+  <link rel="icon" type="image/png" href="assets/cumplo-favicon.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="hero">
+      <div class="hero-brand">
+        <img src="assets/cumplo-banner.png" alt="Cumplø — Goal breakdown assistant" class="brand-banner">
+        <p class="subtitle" data-i18n="header.subtitle">Descompón tareas grandes en pasos pequeños, ordenados y editables. Todo en local, sin enviar nada a la nube.</p>
+      </div>
+      <div class="hero-actions">
+        <div id="ollamaStatus" class="ollama-status" data-state="unknown" role="status" aria-live="polite">
+          <span class="dot"></span>
+          <span class="label" data-i18n="ollama.checking">Comprobando Ollama…</span>
+        </div>
+
+        <div class="lang-switch" role="group" data-i18n-aria-label="header.lang.switch" aria-label="Cambiar idioma">
+          <button class="lang-btn" type="button" data-lang="es" data-i18n="header.lang.es">ES</button>
+          <button class="lang-btn" type="button" data-lang="en" data-i18n="header.lang.en">EN</button>
+        </div>
+
+        <button id="newPlanBtn" class="secondary-btn" type="button"
+                data-i18n="header.newPlan" data-i18n-title="header.newPlan.title"
+                title="Borrar las tareas actuales y empezar de nuevo">Nuevo plan</button>
+        <button id="exportBtn" class="secondary-btn" type="button"
+                data-i18n="header.export" data-i18n-title="header.export.title"
+                title="Descargar el plan en Markdown o JSON" aria-haspopup="dialog">Exportar</button>
+        <button id="openSettingsBtn" class="secondary-btn" type="button"
+                data-i18n="header.settings" aria-haspopup="dialog">Configuración</button>
+        <button id="shutdownBtn" class="secondary-btn" type="button"
+                data-i18n="header.shutdown" data-i18n-title="header.shutdown.title"
+                title="Apagar el servidor local de Cumplø">Apagar</button>
+      </div>
+    </header>
+
+    <main>
+      <section class="panel composer" aria-labelledby="composer-title">
+        <div class="section-head">
+          <div>
+            <h2 id="composer-title" data-i18n="composer.title">Nueva tarea</h2>
+            <p data-i18n="composer.intro">Describe una tarea general. El modelo local propondrá un árbol de subtareas.</p>
+          </div>
+        </div>
+
+        <label for="taskInput" data-i18n="composer.label.task">Tarea principal</label>
+        <textarea id="taskInput" maxlength="2000"
+                  data-i18n-placeholder="composer.placeholder"
+                  placeholder="Ej.: Preparar la reunión mensual de la Junta Directiva"></textarea>
+
+        <div class="controls-grid">
+          <div>
+            <label for="spiceScale" data-i18n="composer.label.spice">Nivel de desglose</label>
+            <div id="spiceScale" class="spice-scale" role="radiogroup"
+                 data-i18n-aria-label="spice.aria"
+                 aria-label="Nivel de desglose, de 1 a 5"></div>
+            <p class="hint" id="spiceHint">Equilibrado: pasos claros sin micro-detalle.</p>
+          </div>
+
+          <div>
+            <label for="profileSelect" data-i18n="composer.label.profile">Perfil</label>
+            <select id="profileSelect">
+              <option value="general"  data-i18n="profile.general"  selected>General</option>
+              <option value="personal" data-i18n="profile.personal">Personal</option>
+              <option value="work"     data-i18n="profile.work">Trabajo</option>
+              <option value="research" data-i18n="profile.research">Investigación doctoral</option>
+              <option value="events"   data-i18n="profile.events">Gestión de eventos</option>
+              <option value="training" data-i18n="profile.training">Formación</option>
+              <option value="archives" data-i18n="profile.archives">Archivo y documentación</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="button-row">
+          <button id="generateBtn" class="primary-btn" type="button" data-i18n="composer.generate">Desglosar tarea</button>
+          <button id="addManualBtn" class="secondary-btn" type="button" data-i18n="composer.addManual">Añadir manualmente</button>
+        </div>
+
+        <div id="statusBox" class="status-box" role="status" aria-live="polite"></div>
+      </section>
+
+      <section class="panel tasks-panel" aria-labelledby="tasks-title">
+        <div class="section-head">
+          <div>
+            <h2 id="tasks-title" data-i18n="tasks.title">Lista de tareas</h2>
+            <p id="taskCount" data-i18n="tasks.empty">Sin tareas todavía.</p>
+          </div>
+          <div class="button-row compact">
+            <label class="toggle-inline">
+              <input id="hideDoneToggle" type="checkbox">
+              <span data-i18n="tasks.hideDone">Ocultar completadas</span>
+            </label>
+            <button id="expandAllBtn" class="secondary-btn" type="button" data-i18n="tasks.expand">Expandir</button>
+            <button id="collapseAllBtn" class="secondary-btn" type="button" data-i18n="tasks.collapse">Contraer</button>
+          </div>
+        </div>
+
+        <div id="taskMeta" class="task-meta hidden"></div>
+        <div id="filterBar" class="filter-bar hidden" role="toolbar"
+             data-i18n-aria-label="tasks.filter.aria"
+             aria-label="Filtrar por categoría"></div>
+
+        <div id="tasksRoot" class="tasks-root empty-state">
+          <p data-i18n="tasks.emptyState">No hay tareas. Crea una tarea nueva o importa un archivo JSON.</p>
+        </div>
+      </section>
+
+      <section class="panel utility-panel" aria-labelledby="utility-title">
+        <div class="section-head">
+          <div>
+            <h2 id="utility-title" data-i18n="util.title">Información y reset</h2>
+            <p data-i18n="util.intro">Acerca de Cumplø y opciones avanzadas.</p>
+          </div>
+          <div class="button-row compact">
+            <button id="clearDataBtn" class="danger-btn" type="button"
+                    data-i18n="util.clearAll" data-i18n-title="util.clearAll.title"
+                    title="Borra TODO: tareas, modelo activo y preferencias">Borrar todos los datos</button>
+          </div>
+        </div>
+
+        <details class="info-details">
+          <summary data-i18n="util.privacy.summary">Privacidad y funcionamiento</summary>
+          <p data-i18n="util.privacy.p1">Cumplø no incluye analítica, cookies ni dependencias externas. Las tareas se guardan en el almacenamiento local del navegador. La generación automática requiere Ollama ejecutándose en este mismo equipo.</p>
+          <p data-i18n="util.privacy.p2">El servidor local solo escucha en 127.0.0.1, está protegido por una CSP estricta y solo permite hablar con Ollama en su puerto 11434.</p>
+        </details>
+
+        <details class="info-details">
+          <summary data-i18n="util.noOllama.summary">¿No conecta con Ollama?</summary>
+          <p data-i18n="util.noOllama.intro">La causa habitual es que la variable de entorno OLLAMA_ORIGINS no incluye el origen de esta aplicación. Es un ajuste único en cada equipo:</p>
+          <ul>
+            <li data-i18n="util.noOllama.win">Windows: Inicio → "Variables de entorno" → variable de usuario OLLAMA_ORIGINS con valor http://127.0.0.1:8765,http://localhost:8765. Cierra y reabre Ollama.</li>
+            <li data-i18n="util.noOllama.mac">macOS: launchctl setenv OLLAMA_ORIGINS "http://127.0.0.1:8765,http://localhost:8765" y reinicia Ollama desde la barra de menú.</li>
+            <li data-i18n="util.noOllama.linux">Linux (systemd): sudo systemctl edit ollama.service y añade Environment="OLLAMA_ORIGINS=http://127.0.0.1:8765,http://localhost:8765". Después sudo systemctl restart ollama.</li>
+          </ul>
+          <p data-i18n="util.noOllama.docs">El detalle completo está en docs/INSTALAR-OLLAMA.es.md.</p>
+        </details>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="branchDialog" class="settings-dialog">
+    <form method="dialog">
+      <div class="dialog-head">
+        <h2 data-i18n="branch.title">Desglosar esta tarea</h2>
+        <button class="icon-btn" value="cancel" data-i18n-aria-label="settings.close.aria" aria-label="Cerrar">×</button>
+      </div>
+
+      <p class="muted" id="branchTaskPreview"></p>
+
+      <label data-i18n="composer.label.spice">Nivel de desglose</label>
+      <div id="branchSpiceScale" class="spice-scale" role="radiogroup"
+           data-i18n-aria-label="spice.aria"
+           aria-label="Nivel de desglose para esta rama"></div>
+      <p class="hint" id="branchSpiceHint">Equilibrado: pasos claros sin micro-detalle.</p>
+
+      <label class="toggle-inline" style="margin-top:14px;">
+        <input id="branchReplaceToggle" type="checkbox">
+        <span data-i18n="branch.replace">Sustituir subtareas existentes (por defecto se añaden)</span>
+      </label>
+
+      <div class="dialog-actions">
+        <button class="secondary-btn" value="cancel" type="button" id="branchCancelBtn" data-i18n="branch.cancel">Cancelar</button>
+        <button class="primary-btn" value="default" type="button" id="branchRunBtn" data-i18n="branch.run">Desglosar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="exportDialog" class="settings-dialog">
+    <form method="dialog">
+      <div class="dialog-head">
+        <h2 data-i18n="export.title">Exportar plan</h2>
+        <button class="icon-btn" value="cancel" data-i18n-aria-label="settings.close.aria" aria-label="Cerrar">×</button>
+      </div>
+
+      <p class="muted" data-i18n="export.intro">Descarga el plan actual en el formato que prefieras. Los datos quedan en tu equipo: la descarga es local, no se sube nada a la nube.</p>
+
+      <div class="export-grid">
+        <button id="dlgExportMarkdownBtn" class="primary-btn" type="button" data-i18n="export.markdown">Markdown (.md)</button>
+        <button id="dlgExportJsonBtn" class="secondary-btn" type="button" data-i18n="export.json">JSON (.json)</button>
+      </div>
+
+      <label for="dlgImportInput" style="margin-top:18px;" data-i18n="export.label.import">Importar plan desde JSON</label>
+      <input id="dlgImportInput" type="file" accept="application/json,.json">
+      <p class="muted" data-i18n="export.import.hint">Sustituye las tareas actuales por las del fichero JSON elegido.</p>
+
+      <div class="dialog-actions">
+        <button class="secondary-btn" value="cancel" type="button" id="exportCloseBtn" data-i18n="export.close">Cerrar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="settingsDialog" class="settings-dialog">
+    <form method="dialog">
+      <div class="dialog-head">
+        <h2 data-i18n="settings.title">Configuración</h2>
+        <button class="icon-btn" value="cancel" data-i18n-aria-label="settings.close.aria" aria-label="Cerrar">×</button>
+      </div>
+
+      <label for="modelSelect" data-i18n="settings.label.model">Modelo activo</label>
+      <select id="modelSelect">
+        <option value="" data-i18n="settings.model.empty">— Sin modelos detectados —</option>
+      </select>
+      <p class="hint" id="modelHint"></p>
+
+      <label for="temperatureInput" data-i18n="settings.label.temp">Temperatura</label>
+      <input id="temperatureInput" type="number" min="0" max="1" step="0.1" value="0.25">
+
+      <div class="dialog-actions">
+        <button id="redetectBtn" class="secondary-btn" type="button" data-i18n="settings.redetect">Reintentar detección</button>
+        <button id="saveSettingsBtn" class="primary-btn" value="default" type="button" data-i18n="settings.save">Guardar</button>
+      </div>
+
+      <p class="muted" data-i18n="settings.note">Endpoint: http://localhost:11434 (fijo). Cumplø no permite cambiarlo para mantener la CSP estricta.</p>
+    </form>
+  </dialog>
+
+  <script src="i18n.js"></script>
+  <script src="prompts.js"></script>
+  <script src="ollama.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
