@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.8.0-beta — Gestión local de proyectos
+
+### Añadido
+
+- Nueva jerarquía funcional: **Proyecto → Tareas → Subtareas**.
+- Panel lateral de **proyectos guardados** con búsqueda, selección y contador de activos/archivados.
+- Acciones de proyecto: **renombrar**, **duplicar**, **archivar/restaurar** y **eliminar**.
+- Persistencia local de múltiples proyectos en `localStorage` mediante el esquema `cumplo.projects.v2`.
+- Migración automática desde el esquema anterior de plan único (`cumplo_state_v1`).
+- Exportación del proyecto actual en JSON (`cumplo.project.v2`) y exportación completa de la biblioteca de proyectos en JSON (`cumplo.projects.v2`).
+- Importación de uno o varios proyectos desde JSON sin sobrescribir los ya existentes.
+- Workflows de repositorio para checks básicos de seguridad y sintaxis.
+
+### Cambiado
+
+- La interfaz deja de hablar de “plan” como unidad principal y adopta “proyecto” como entidad superior.
+- El prompt interno de Ollama fuerza una estructura de dos niveles bajo proyecto: tareas y subtareas.
+- El botón principal pasa a **Descomponer proyecto**.
+- El modo efímero afecta a la biblioteca de proyectos completa, no solo a un plan activo.
+- El límite de profundidad se reduce al modelo funcional previsto: tareas y subtareas.
+
+### Compatibilidad
+
+- Los JSON antiguos con envoltorio `plan` siguen pudiendo importarse como proyectos.
+- Si el navegador contiene datos de la versión 0.7, Cumplø crea un proyecto recuperado y lo incorpora a la biblioteca local.
+
 ## 0.7.0-beta — Beta pública: privacidad, control de generación y marca original
 
 ### Privacidad y persistencia

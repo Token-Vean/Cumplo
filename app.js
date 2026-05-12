@@ -1,39 +1,25 @@
 // =============================================================================
-// Cumplø — app.js  ·  v0.7.0-beta
-// Estado, render y handlers. Tratamos la respuesta del modelo como entrada
-// no confiable: parsea, normaliza, recorta longitudes, profundidad máxima,
-// y nunca inserta HTML generado por el modelo (solo textContent / nodos DOM).
-//
-// Bilingüe ES/EN: todos los strings dinámicos pasan por I18N.t(). El idioma
-// activo se inyecta también en los prompts enviados a Ollama.
-//
-// Cambios respecto a 0.5.0:
-//  - MAX_DEPTH en normalizeTask: cota dura contra anidación patológica.
-//  - saveState con try/catch: tolera QuotaExceededError y modo privado.
-//  - Pantalla de apagado construida con createElement (CSP-friendly, sin
-//    innerHTML + estilos inline).
-//  - Edición inline de la descripción (textarea en la tarjeta) en lugar de
-//    prompt() bloqueante.
-//  - Filtro de texto sobre títulos y descripciones (además del filtro emoji).
-//  - Atajo Ctrl/Cmd + Enter en el textarea para disparar "Desglosar tarea".
-//  - debounce del guardado del título en localStorage.
-//  - Versión visible en el footer, obtenida del propio servidor local.
+// Cumplø — app.js  ·  v0.8.0-beta
+// Gestión local de proyectos, tareas y subtareas. La respuesta del modelo se
+// trata como entrada no confiable: se parsea, normaliza, recorta y se renderiza
+// siempre mediante nodos DOM/textContent, nunca mediante HTML generado por IA.
 // =============================================================================
 
 // -----------------------------------------------------------------------------
 // Constantes
 // -----------------------------------------------------------------------------
-const STORAGE_KEY  = "cumplo_state_v1";
+const PROJECTS_STORAGE_KEY = "cumplo_projects_v2";
 const SETTINGS_KEY = "cumplo_settings_v1";
-const EXPORT_SCHEMA_VERSION = "cumplo.plan.v1";
-const APP_VERSION = "0.7.0-beta";
+const EXPORT_PROJECT_SCHEMA_VERSION = "cumplo.project.v2";
+const EXPORT_LIBRARY_SCHEMA_VERSION = "cumplo.projects.v2";
+const APP_VERSION = "0.8.0-beta";
 
-const LEGACY_STATE_KEYS    = ["tareas_locales_state_v1"];
+const LEGACY_STATE_KEYS    = ["cumplo_state_v1", "tareas_locales_state_v1"];
 const LEGACY_SETTINGS_KEYS = ["tareas_locales_settings_v1"];
 
 const DEFAULT_SETTINGS = { temperature: 0.25, ephemeral: false };
 const DEFAULT_SPICE = 3;
-const MAX_DEPTH = 6;        // anidación máxima permitida al normalizar
+const MAX_DEPTH = 1;        // jerarquía de producto: Proyecto → Tareas → Subtareas
 const SAVE_DEBOUNCE_MS = 300;
 const IMPORT_MAX_BYTES = 2 * 1024 * 1024; // 2 MB: evita bloqueos por JSON enormes
 const VALID_ID_RE = /^[a-z0-9][a-z0-9_.:-]{1,127}$/i;
@@ -44,13 +30,17 @@ const ALLOWED_EMOJIS = new Set([
   "🏛️","🍽️","🎯","⚠️","✅"
 ]);
 
-// Atajo cómodo para I18N.t.
 function T(key, params) { return window.I18N.t(key, params); }
+function TF(key, fallback, params) {
+  const value = T(key, params);
+  return value === key ? fallback : value;
+}
 
 // -----------------------------------------------------------------------------
 // Estado en memoria
 // -----------------------------------------------------------------------------
-let state = emptyState();
+let library = emptyLibrary();
+let state = emptyProjectSkeleton();
 let uiState = {
   spice: DEFAULT_SPICE,
   branchSpice: DEFAULT_SPICE,
@@ -58,16 +48,31 @@ let uiState = {
   hideDone: false,
   emojiFilter: null,
   textFilter: "",
-  descEditingId: null   // id de la tarea con descripción en edición
+  projectFilter: "",
+  showArchived: false,
+  descEditingId: null
 };
 
-function emptyState() {
+function emptyLibrary() {
   return {
+    schema_version: EXPORT_LIBRARY_SCHEMA_VERSION,
+    app_version: APP_VERSION,
+    active_project_id: null,
+    projects: []
+  };
+}
+
+function emptyProjectSkeleton() {
+  return {
+    id: "",
     title: "",
     summary: "",
     category: "",
     difficulty: "",
     estimated_total_time: "",
+    status: "active",
+    created_at: "",
+    updated_at: "",
     tasks: []
   };
 }
@@ -106,6 +111,7 @@ const els = {
   exportCloseBtn:      document.getElementById("exportCloseBtn"),
   dlgExportMarkdownBtn: document.getElementById("dlgExportMarkdownBtn"),
   dlgExportJsonBtn:    document.getElementById("dlgExportJsonBtn"),
+  dlgExportAllJsonBtn: document.getElementById("dlgExportAllJsonBtn"),
   dlgImportInput:      document.getElementById("dlgImportInput"),
   branchDialog:        document.getElementById("branchDialog"),
   branchSpiceScale:    document.getElementById("branchSpiceScale"),
@@ -119,16 +125,23 @@ const els = {
   footerVersion:       document.getElementById("footerVersion"),
   ephemeralToggle:     document.getElementById("ephemeralToggle"),
   ollamaDiagnostics:   document.getElementById("ollamaDiagnostics"),
-  retryOllamaBtn:      document.getElementById("retryOllamaBtn")
+  retryOllamaBtn:      document.getElementById("retryOllamaBtn"),
+  projectsList:        document.getElementById("projectsList"),
+  projectsCount:       document.getElementById("projectsCount"),
+  projectSearchInput:  document.getElementById("projectSearchInput"),
+  showArchivedToggle:  document.getElementById("showArchivedToggle"),
+  duplicateProjectBtn: document.getElementById("duplicateProjectBtn"),
+  archiveProjectBtn:   document.getElementById("archiveProjectBtn"),
+  deleteProjectBtn:    document.getElementById("deleteProjectBtn"),
+  renameProjectBtn:    document.getElementById("renameProjectBtn")
 };
 
 const langBtns = document.querySelectorAll(".lang-btn");
-
 let activeGenerateController = null;
 let activeBranchController = null;
 
 // -----------------------------------------------------------------------------
-// Utilidad: debounce
+// Utilidades
 // -----------------------------------------------------------------------------
 function debounce(fn, ms) {
   let t;
@@ -138,101 +151,22 @@ function debounce(fn, ms) {
   };
 }
 
-// -----------------------------------------------------------------------------
-// Settings de la app
-// -----------------------------------------------------------------------------
-function loadSettings() {
-  try {
-    let raw = localStorage.getItem(SETTINGS_KEY);
-    if (!raw) {
-      for (const k of LEGACY_SETTINGS_KEYS) {
-        raw = localStorage.getItem(k);
-        if (raw) break;
-      }
-    }
-    return { ...DEFAULT_SETTINGS, ...(raw ? JSON.parse(raw) : {}) };
-  } catch {
-    return { ...DEFAULT_SETTINGS };
-  }
-}
-
-function saveSettings(settings) {
-  const merged = { ...DEFAULT_SETTINGS, ...(settings || {}) };
-  try {
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify(merged));
-  } catch (e) {
-    console.warn("Cumplø: no se pudieron guardar las preferencias", e);
-    setStatus(T('status.save.quotaError'), "error");
-  }
-}
-
-// -----------------------------------------------------------------------------
-// Estado del plan
-// -----------------------------------------------------------------------------
-function removePersistentState() {
-  try {
-    localStorage.removeItem(STORAGE_KEY);
-    for (const k of LEGACY_STATE_KEYS) localStorage.removeItem(k);
-  } catch (e) {
-    console.warn("Cumplø: no se pudo borrar el estado persistido", e);
-  }
-}
-
-function isEphemeralMode() {
-  return Boolean(loadSettings().ephemeral);
-}
-
-function saveState() {
-  if (isEphemeralMode()) {
-    removePersistentState();
-    return;
-  }
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-  } catch (e) {
-    // Más probable: QuotaExceededError o modo privado con cuota a 0.
-    console.warn("Cumplø: no se pudo guardar el estado", e);
-    setStatus(T('status.save.quotaError'), "error");
-  }
-}
-
-const saveStateDebounced = debounce(saveState, SAVE_DEBOUNCE_MS);
-
-function loadState() {
-  if (isEphemeralMode()) {
-    removePersistentState();
-    return;
-  }
-  try {
-    let raw = localStorage.getItem(STORAGE_KEY);
-    let migrated = false;
-    if (!raw) {
-      for (const k of LEGACY_STATE_KEYS) {
-        raw = localStorage.getItem(k);
-        if (raw) { migrated = true; break; }
-      }
-    }
-    if (!raw) return;
-    state = normalizePlan(JSON.parse(raw));
-    if (migrated) saveState();
-  } catch {
-    state = emptyState();
-  }
-}
-
-// -----------------------------------------------------------------------------
-// Utilidades
-// -----------------------------------------------------------------------------
 function setStatus(message, type = "") {
   els.statusBox.textContent = message;
   els.statusBox.className = `status-box ${type}`.trim();
 }
 
-function uid(prefix = "t") {
+function uid(prefix = "id") {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function normalizeInternalId(value, prefix = "t") {
+function nowIso() { return new Date().toISOString(); }
+
+function clone(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function normalizeInternalId(value, prefix = "id") {
   const v = String(value || "").trim();
   return VALID_ID_RE.test(v) ? v : uid(prefix);
 }
@@ -241,18 +175,6 @@ function freshId(prefix, seen) {
   let id;
   do { id = uid(prefix); } while (seen.has(id));
   return id;
-}
-
-function ensureUniqueIds(tasks, seen = new Set()) {
-  for (const task of tasks || []) {
-    if (!task || typeof task !== "object") continue;
-    if (!task.id || seen.has(task.id) || !VALID_ID_RE.test(task.id)) {
-      task.id = freshId("t", seen);
-    }
-    seen.add(task.id);
-    ensureUniqueIds(task.subtasks || [], seen);
-  }
-  return tasks;
 }
 
 function stripCodeFences(text) {
@@ -273,6 +195,23 @@ function extractJson(text) {
     }
     return JSON.parse(cleaned.slice(first, last + 1));
   }
+}
+
+function projectHasContent(project) {
+  return Boolean(project && (project.title || project.summary || (project.tasks || []).length));
+}
+
+function displayProjectTitle(project) {
+  return project && project.title ? project.title : T('meta.noTitle');
+}
+
+function slugForFile(value, fallback = "cumplo-project") {
+  return String(value || fallback)
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 70) || fallback;
 }
 
 // Acepta "baja|media|alta" y "low|medium|high"; normaliza al idioma actual.
@@ -297,15 +236,17 @@ function normalizeEmoji(value) {
   return "📝";
 }
 
+function normalizeStatus(value) {
+  return String(value || "active") === "archived" ? "archived" : "active";
+}
+
 function normalizeTask(task, index = 0, depth = 0) {
   const safe = task && typeof task === "object" ? task : {};
-  // Cota dura de anidación. Si llegamos al límite, descartamos subtareas
-  // ulteriores: evita stack overflow con JSON malicioso o muy profundo.
   const subtasks = (depth < MAX_DEPTH && Array.isArray(safe.subtasks))
-    ? safe.subtasks.slice(0, 40).map((t, i) => normalizeTask(t, i, depth + 1))
+    ? safe.subtasks.slice(0, 60).map((t, i) => normalizeTask(t, i, depth + 1))
     : [];
   return {
-    id:             normalizeInternalId(safe.id, `t${index}`),
+    id:             normalizeInternalId(safe.id, depth === 0 ? `task${index}` : `subtask${index}`),
     title:          String(safe.title || T('prompt.newSubtask.title')).slice(0, 240),
     emoji:          normalizeEmoji(safe.emoji),
     description:    String(safe.description || "").slice(0, 1000),
@@ -317,30 +258,92 @@ function normalizeTask(task, index = 0, depth = 0) {
   };
 }
 
-function normalizePlan(plan) {
-  const safe = plan && typeof plan === "object" ? plan : {};
+function ensureUniqueTaskIds(tasks, seen = new Set()) {
+  for (const task of tasks || []) {
+    if (!task || typeof task !== "object") continue;
+    if (!task.id || seen.has(task.id) || !VALID_ID_RE.test(task.id)) {
+      task.id = freshId("task", seen);
+    }
+    seen.add(task.id);
+    ensureUniqueTaskIds(task.subtasks || [], seen);
+  }
+  return tasks;
+}
+
+function normalizeProject(project, opts = {}) {
+  const safe = project && typeof project === "object" ? project : {};
+  const created = String(safe.created_at || opts.created_at || nowIso()).slice(0, 40);
+  const updated = String(safe.updated_at || opts.updated_at || created).slice(0, 40);
   const tasks = Array.isArray(safe.tasks)
-    ? safe.tasks.slice(0, 80).map((t, i) => normalizeTask(t, i, 0))
+    ? safe.tasks.slice(0, 100).map((t, i) => normalizeTask(t, i, 0))
     : [];
-  ensureUniqueIds(tasks);
+  ensureUniqueTaskIds(tasks);
   return {
-    title:                String(safe.title   || "").slice(0, 200),
+    id:                   normalizeInternalId(safe.id || opts.id, "project"),
+    title:                String(safe.title || "").slice(0, 200),
     summary:              String(safe.summary || "").slice(0, 1000),
     category:             String(safe.category || "").slice(0, 60),
-    difficulty:           normalizeEnergy(safe.difficulty),
-    estimated_total_time: String(safe.estimated_total_time || T('task.time.unknown')).slice(0, 100),
+    difficulty:           safe.difficulty ? normalizeEnergy(safe.difficulty) : "",
+    estimated_total_time: String(safe.estimated_total_time || "").slice(0, 100),
+    status:               normalizeStatus(safe.status),
+    created_at:           created,
+    updated_at:           updated,
     tasks
   };
 }
 
-function normalizeBranch(payload) {
+function newProject(seed = {}) {
+  const n = nowIso();
+  return normalizeProject({
+    id: uid("project"),
+    title: "",
+    summary: "",
+    category: "",
+    difficulty: "",
+    estimated_total_time: "",
+    status: "active",
+    created_at: n,
+    updated_at: n,
+    tasks: [],
+    ...seed
+  });
+}
+
+function ensureUniqueProjectIds(projects) {
+  const seen = new Set();
+  for (const project of projects || []) {
+    if (!project.id || seen.has(project.id) || !VALID_ID_RE.test(project.id)) {
+      project.id = freshId("project", seen);
+    }
+    seen.add(project.id);
+    ensureUniqueTaskIds(project.tasks || []);
+  }
+  return projects;
+}
+
+function normalizeLibrary(payload) {
   const safe = payload && typeof payload === "object" ? payload : {};
-  const arr = Array.isArray(safe.tasks) ? safe.tasks : [];
-  return ensureUniqueIds(arr.slice(0, 40).map((t, i) => normalizeTask(t, i, 1)));
+  const sourceProjects = Array.isArray(safe.projects) ? safe.projects : [];
+  const projects = sourceProjects.slice(0, 250).map(p => normalizeProject(p));
+  ensureUniqueProjectIds(projects);
+  let active = String(safe.active_project_id || "");
+  if (!projects.some(p => p.id === active)) active = projects[0] ? projects[0].id : null;
+  return {
+    schema_version: EXPORT_LIBRARY_SCHEMA_VERSION,
+    app_version: APP_VERSION,
+    active_project_id: active,
+    projects
+  };
 }
 
 function countTasks(tasks) {
   return tasks.reduce((acc, task) => acc + 1 + countTasks(task.subtasks || []), 0);
+}
+
+function countRootTasks(tasks) { return (tasks || []).length; }
+
+function countSubtasks(tasks) {
+  return (tasks || []).reduce((acc, task) => acc + (task.subtasks || []).length + countSubtasks(task.subtasks || []), 0);
 }
 
 function countDone(tasks) {
@@ -371,6 +374,140 @@ function branchMatchesText(task, needle) {
 
 function isWholeDone(task) {
   return task.done && (task.subtasks || []).every(isWholeDone);
+}
+
+// -----------------------------------------------------------------------------
+// Settings
+// -----------------------------------------------------------------------------
+function loadSettings() {
+  try {
+    let raw = localStorage.getItem(SETTINGS_KEY);
+    if (!raw) {
+      for (const k of LEGACY_SETTINGS_KEYS) {
+        raw = localStorage.getItem(k);
+        if (raw) break;
+      }
+    }
+    return { ...DEFAULT_SETTINGS, ...(raw ? JSON.parse(raw) : {}) };
+  } catch {
+    return { ...DEFAULT_SETTINGS };
+  }
+}
+
+function saveSettings(settings) {
+  const merged = { ...DEFAULT_SETTINGS, ...(settings || {}) };
+  try {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(merged));
+  } catch (e) {
+    console.warn("Cumplø: no se pudieron guardar las preferencias", e);
+    setStatus(T('status.save.quotaError'), "error");
+  }
+}
+
+function isEphemeralMode() {
+  return Boolean(loadSettings().ephemeral);
+}
+
+// -----------------------------------------------------------------------------
+// Persistencia de proyectos
+// -----------------------------------------------------------------------------
+function removePersistentState() {
+  try {
+    localStorage.removeItem(PROJECTS_STORAGE_KEY);
+    for (const k of LEGACY_STATE_KEYS) localStorage.removeItem(k);
+  } catch (e) {
+    console.warn("Cumplø: no se pudo borrar el estado persistido", e);
+  }
+}
+
+function getActiveProjectIndex() {
+  return library.projects.findIndex(p => p.id === state.id);
+}
+
+function syncStateIntoLibrary({ touch = true } = {}) {
+  if (!state || typeof state !== "object") state = newProject();
+  if (!state.id) state.id = uid("project");
+  if (!state.created_at) state.created_at = nowIso();
+  if (touch) state.updated_at = nowIso();
+  state = normalizeProject(state);
+  const index = library.projects.findIndex(p => p.id === state.id);
+  if (index >= 0) library.projects[index] = state;
+  else library.projects.unshift(state);
+  ensureUniqueProjectIds(library.projects);
+  library.active_project_id = state.id;
+}
+
+function saveState(opts = {}) {
+  syncStateIntoLibrary(opts);
+  if (isEphemeralMode()) {
+    removePersistentState();
+    return;
+  }
+  try {
+    const payload = {
+      schema_version: EXPORT_LIBRARY_SCHEMA_VERSION,
+      app_version: APP_VERSION,
+      saved_at: nowIso(),
+      active_project_id: library.active_project_id,
+      projects: library.projects
+    };
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(payload));
+  } catch (e) {
+    console.warn("Cumplø: no se pudo guardar el estado", e);
+    setStatus(T('status.save.quotaError'), "error");
+  }
+}
+
+const saveStateDebounced = debounce(saveState, SAVE_DEBOUNCE_MS);
+
+function loadState() {
+  if (isEphemeralMode()) {
+    removePersistentState();
+    library = emptyLibrary();
+    state = newProject();
+    library.projects = [state];
+    library.active_project_id = state.id;
+    return;
+  }
+
+  try {
+    const raw = localStorage.getItem(PROJECTS_STORAGE_KEY);
+    if (raw) {
+      library = normalizeLibrary(JSON.parse(raw));
+      if (!library.projects.length) {
+        state = newProject();
+        library.projects = [state];
+        library.active_project_id = state.id;
+      } else {
+        state = library.projects.find(p => p.id === library.active_project_id) || library.projects[0];
+      }
+      saveState({ touch: false });
+      return;
+    }
+
+    let legacyRaw = null;
+    for (const k of LEGACY_STATE_KEYS) {
+      legacyRaw = localStorage.getItem(k);
+      if (legacyRaw) break;
+    }
+    if (legacyRaw) {
+      const legacy = normalizeProject(JSON.parse(legacyRaw), { id: uid("project") });
+      if (!legacy.title) legacy.title = TF('projects.migratedTitle', 'Proyecto recuperado');
+      library = emptyLibrary();
+      library.projects = [legacy];
+      library.active_project_id = legacy.id;
+      state = legacy;
+      saveState({ touch: false });
+      return;
+    }
+  } catch (e) {
+    console.warn("Cumplø: no se pudo cargar el estado", e);
+  }
+
+  library = emptyLibrary();
+  state = newProject();
+  library.projects = [state];
+  library.active_project_id = state.id;
 }
 
 // -----------------------------------------------------------------------------
@@ -422,13 +559,9 @@ function renderOllamaStatus() {
     return;
   }
   els.ollamaStatus.dataset.state = "on";
-  if (ol.activeModel) {
-    label.textContent = T('ollama.activeModel', { model: ol.activeModel });
-  } else if (ol.models.length) {
-    label.textContent = T('ollama.someModels', { count: ol.models.length });
-  } else {
-    label.textContent = T('ollama.noModel');
-  }
+  if (ol.activeModel) label.textContent = T('ollama.activeModel', { model: ol.activeModel });
+  else if (ol.models.length) label.textContent = T('ollama.someModels', { count: ol.models.length });
+  else label.textContent = T('ollama.noModel');
   els.ollamaStatus.title = T('ollama.detectedCount', { count: ol.models.length });
 }
 
@@ -444,9 +577,7 @@ function renderModelSelect() {
     opt.textContent = T('settings.model.empty');
     select.appendChild(opt);
     select.disabled = true;
-    els.modelHint.textContent = ol.available
-      ? T('settings.hint.noModels')
-      : T('settings.hint.noOllama');
+    els.modelHint.textContent = ol.available ? T('settings.hint.noModels') : T('settings.hint.noOllama');
     return;
   }
 
@@ -498,10 +629,14 @@ function renderEphemeralToggle() {
 // Render principal
 // -----------------------------------------------------------------------------
 function render() {
+  renderProjectSidebar();
+
   const total = countTasks(state.tasks);
   const done  = countDone(state.tasks);
+  const root  = countRootTasks(state.tasks);
+  const subs  = countSubtasks(state.tasks);
   els.taskCount.textContent = total
-    ? T('tasks.counter', { done, total })
+    ? TF('tasks.counter.detailed', `${done}/${total} elementos completados · ${root} tareas · ${subs} subtareas`, { done, total, root, subs })
     : T('tasks.empty');
 
   renderMeta();
@@ -518,7 +653,91 @@ function render() {
 
   els.tasksRoot.className = "tasks-root";
   els.tasksRoot.innerHTML = "";
-  els.tasksRoot.appendChild(renderTaskList(state.tasks));
+  els.tasksRoot.appendChild(renderTaskList(state.tasks, 0));
+}
+
+function renderProjectSidebar() {
+  if (!els.projectsList) return;
+  syncStateIntoLibrary({ touch: false });
+
+  const all = library.projects.slice().sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)));
+  const activeCount = all.filter(p => p.status !== "archived").length;
+  const archivedCount = all.length - activeCount;
+  if (els.projectsCount) {
+    els.projectsCount.textContent = TF(
+      'projects.counter',
+      `${activeCount} proyectos activos · ${archivedCount} archivados`,
+      { active: activeCount, archived: archivedCount }
+    );
+  }
+
+  const needle = uiState.projectFilter.trim().toLowerCase();
+  const visible = all.filter(p => {
+    if (!uiState.showArchived && p.status === "archived") return false;
+    if (!needle) return true;
+    return `${p.title} ${p.summary} ${p.category}`.toLowerCase().includes(needle);
+  });
+
+  els.projectsList.innerHTML = "";
+  if (!visible.length) {
+    const empty = document.createElement("p");
+    empty.className = "muted project-empty";
+    empty.textContent = TF('projects.empty', 'No hay proyectos que mostrar.');
+    els.projectsList.appendChild(empty);
+    return;
+  }
+
+  for (const project of visible) {
+    els.projectsList.appendChild(renderProjectCard(project));
+  }
+
+  if (els.archiveProjectBtn) {
+    const archived = state.status === "archived";
+    els.archiveProjectBtn.textContent = archived ? TF('projects.restore', 'Restaurar') : TF('projects.archive', 'Archivar');
+  }
+}
+
+function renderProjectCard(project) {
+  const card = document.createElement("article");
+  card.className = "project-card" + (project.id === state.id ? " active" : "") + (project.status === "archived" ? " archived" : "");
+
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "project-card-main";
+  button.setAttribute("aria-current", project.id === state.id ? "true" : "false");
+  button.addEventListener("click", () => selectProject(project.id));
+
+  const title = document.createElement("strong");
+  title.className = "project-card-title";
+  title.textContent = displayProjectTitle(project);
+
+  const total = countTasks(project.tasks || []);
+  const done = countDone(project.tasks || []);
+  const root = countRootTasks(project.tasks || []);
+  const subs = countSubtasks(project.tasks || []);
+  const meta = document.createElement("span");
+  meta.className = "project-card-meta";
+  meta.textContent = TF('projects.card.meta', `${root} tareas · ${subs} subtareas · ${done}/${total}`, { root, subs, done, total });
+
+  const updated = document.createElement("span");
+  updated.className = "project-card-date";
+  updated.textContent = formatDate(project.updated_at);
+
+  button.append(title, meta, updated);
+  card.appendChild(button);
+  return card;
+}
+
+function formatDate(value) {
+  if (!value) return "—";
+  try {
+    const d = new Date(value);
+    return new Intl.DateTimeFormat(window.I18N.lang === "en" ? "en-GB" : "es-ES", {
+      day: "2-digit", month: "2-digit", year: "2-digit", hour: "2-digit", minute: "2-digit"
+    }).format(d);
+  } catch {
+    return String(value).slice(0, 16);
+  }
 }
 
 function renderMeta() {
@@ -532,10 +751,10 @@ function renderMeta() {
   els.taskMeta.innerHTML = "";
 
   const items = [
-    [T('meta.plan'),       state.title    || T('meta.noTitle')],
-    [T('meta.category'),   state.category || "—"],
+    [TF('meta.project', 'Proyecto'), displayProjectTitle(state)],
+    [T('meta.category'), state.category || "—"],
     [T('meta.difficulty'), state.difficulty || T('task.energy.unknown')],
-    [T('meta.totalTime'),  state.estimated_total_time || T('task.time.unknown')]
+    [T('meta.totalTime'), state.estimated_total_time || T('task.time.unknown')]
   ];
 
   for (const [label, value] of items) {
@@ -551,7 +770,6 @@ function renderMeta() {
 }
 
 function renderToolbar() {
-  // Toolbar = búsqueda + filtros emoji. Solo se muestra si hay tareas.
   if (!state.tasks.length) {
     els.taskToolbar.classList.add("hidden");
     els.filterBar.innerHTML = "";
@@ -590,22 +808,22 @@ function renderFilterBar() {
   }
 }
 
-function renderTaskList(tasks) {
+function renderTaskList(tasks, depth = 0) {
   const ul = document.createElement("ul");
-  ul.className = "task-list";
+  ul.className = depth === 0 ? "task-list" : "task-list subtask-list";
   const needle = uiState.textFilter.trim().toLowerCase();
   for (const task of tasks) {
     if (uiState.emojiFilter && !branchMatchesEmoji(task, uiState.emojiFilter)) continue;
     if (needle && !branchMatchesText(task, needle)) continue;
     if (uiState.hideDone && task.done && (task.subtasks || []).every(s => isWholeDone(s))) continue;
-    ul.appendChild(renderTaskItem(task));
+    ul.appendChild(renderTaskItem(task, depth));
   }
   return ul;
 }
 
-function renderTaskItem(task) {
+function renderTaskItem(task, depth = 0) {
   const li = document.createElement("li");
-  li.className = `task-item ${task.done ? "done" : ""}`;
+  li.className = `task-item ${task.done ? "done" : ""} ${depth > 0 ? "is-subtask" : "is-task"}`;
 
   const card = document.createElement("article");
   card.className = "task-card";
@@ -651,36 +869,28 @@ function renderTaskItem(task) {
   const title = document.createElement("input");
   title.type = "text";
   title.className = "task-title";
-  title.setAttribute("aria-label", T('task.title.aria'));
+  title.setAttribute("aria-label", depth === 0 ? T('task.title.aria') : TF('subtask.title.aria', 'Título de la subtarea'));
   title.value = task.title;
   title.maxLength = 240;
   title.addEventListener("input", () => {
     task.title = title.value.slice(0, 240);
     saveStateDebounced();
   });
-  title.addEventListener("blur", () => {
-    // Garantizar persistencia inmediata al perder foco.
-    saveState();
-  });
+  title.addEventListener("blur", () => saveState());
 
   titleRow.append(emojiSpan, title);
 
-  // Descripción: en modo lectura o en modo edición inline
   const descContainer = document.createElement("div");
   descContainer.className = "task-description-container";
-
-  if (uiState.descEditingId === task.id) {
-    renderDescriptionEditor(descContainer, task);
-  } else {
-    renderDescriptionReader(descContainer, task);
-  }
+  if (uiState.descEditingId === task.id) renderDescriptionEditor(descContainer, task);
+  else renderDescriptionReader(descContainer, task);
 
   const details = document.createElement("div");
   details.className = "task-details";
 
   const time = document.createElement("span");
   time.className = "pill";
-  time.textContent = T('task.time',   { value: task.estimated_time || T('task.time.unknown') });
+  time.textContent = T('task.time', { value: task.estimated_time || T('task.time.unknown') });
 
   const energy = document.createElement("span");
   energy.className = "pill";
@@ -692,25 +902,28 @@ function renderTaskItem(task) {
   const actions = document.createElement("div");
   actions.className = "task-actions";
 
-  const expandAiBtn = smallButton(T('task.action.expandMore'), () => openBranchDialog(task));
-  expandAiBtn.title = T('task.action.expandMore.title');
+  if (depth === 0) {
+    const expandAiBtn = smallButton(T('task.action.expandMore'), () => openBranchDialog(task));
+    expandAiBtn.title = T('task.action.expandMore.title');
 
-  const addBtn = smallButton(T('task.action.addSub'), () => {
-    task.subtasks.push({
-      id: uid("sub"),
-      title: T('prompt.newSubtask.title'),
-      emoji: "📝",
-      description: "",
-      estimated_time: T('task.time.unknown'),
-      energy: T('task.energy.unknown'),
-      done: false,
-      collapsed: false,
-      subtasks: []
+    const addBtn = smallButton(T('task.action.addSub'), () => {
+      task.subtasks.push({
+        id: uid("subtask"),
+        title: T('prompt.newSubtask.title'),
+        emoji: "📝",
+        description: "",
+        estimated_time: T('task.time.unknown'),
+        energy: T('task.energy.unknown'),
+        done: false,
+        collapsed: false,
+        subtasks: []
+      });
+      task.collapsed = false;
+      saveState();
+      render();
     });
-    task.collapsed = false;
-    saveState();
-    render();
-  });
+    actions.append(expandAiBtn, addBtn);
+  }
 
   const editBtn = smallButton(T('task.action.editDesc'), () => {
     uiState.descEditingId = task.id;
@@ -726,12 +939,12 @@ function renderTaskItem(task) {
   });
   deleteBtn.classList.add("danger-small");
 
-  actions.append(expandAiBtn, addBtn, editBtn, deleteBtn);
+  actions.append(editBtn, deleteBtn);
   main.append(checkbox, toggle, content, actions);
   card.appendChild(main);
 
   if (task.subtasks && task.subtasks.length && !task.collapsed) {
-    card.appendChild(renderTaskList(task.subtasks));
+    card.appendChild(renderTaskList(task.subtasks, depth + 1));
   }
 
   li.appendChild(card);
@@ -755,7 +968,6 @@ function renderDescriptionEditor(container, task) {
   ta.rows = 3;
   ta.setAttribute("aria-label", T('task.action.editDesc'));
 
-  // Focus + cursor al final cuando entra en edición
   setTimeout(() => {
     ta.focus();
     ta.setSelectionRange(ta.value.length, ta.value.length);
@@ -776,7 +988,6 @@ function renderDescriptionEditor(container, task) {
     render();
   });
 
-  // Atajo: Cmd/Ctrl + Enter para guardar; Esc para cancelar
   ta.addEventListener("keydown", (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
       e.preventDefault();
@@ -809,10 +1020,10 @@ function removeTaskById(tasks, id) {
   return false;
 }
 
-function findTaskById(tasks, id) {
+function findTaskById(tasks, id, depth = 0) {
   for (const t of tasks) {
-    if (t.id === id) return t;
-    const sub = findTaskById(t.subtasks || [], id);
+    if (t.id === id) return { task: t, depth };
+    const sub = findTaskById(t.subtasks || [], id, depth + 1);
     if (sub) return sub;
   }
   return null;
@@ -826,31 +1037,123 @@ function setAllCollapsed(tasks, collapsed) {
 }
 
 // -----------------------------------------------------------------------------
-// Exportaciones
+// Gestión de proyectos
 // -----------------------------------------------------------------------------
-function buildExportPayload() {
+function selectProject(id) {
+  if (!id || id === state.id) return;
+  syncStateIntoLibrary({ touch: false });
+  const next = library.projects.find(p => p.id === id);
+  if (!next) return;
+  state = next;
+  library.active_project_id = state.id;
+  uiState.emojiFilter = null;
+  uiState.textFilter = "";
+  uiState.descEditingId = null;
+  if (els.searchInput) els.searchInput.value = "";
+  saveState({ touch: false });
+  render();
+  setStatus(TF('status.project.selected', 'Proyecto seleccionado.'), "ok");
+}
+
+function createBlankProject() {
+  syncStateIntoLibrary({ touch: false });
+  state = newProject({ title: "" });
+  library.projects.unshift(state);
+  library.active_project_id = state.id;
+  uiState.emojiFilter = null;
+  uiState.textFilter = "";
+  uiState.descEditingId = null;
+  els.taskInput.value = "";
+  if (els.searchInput) els.searchInput.value = "";
+  saveState({ touch: false });
+  render();
+  setStatus(T('status.newPlan'), "ok");
+}
+
+function renameActiveProject() {
+  const current = state.title || "";
+  const next = prompt(TF('projects.rename.prompt', 'Nuevo nombre del proyecto:'), current);
+  if (next === null) return;
+  state.title = String(next).trim().slice(0, 200);
+  saveState();
+  render();
+  setStatus(TF('status.project.renamed', 'Proyecto renombrado.'), "ok");
+}
+
+function duplicateActiveProject() {
+  syncStateIntoLibrary({ touch: false });
+  const copy = clone(state);
+  const n = nowIso();
+  copy.id = uid("project");
+  copy.title = TF('projects.copyOf', 'Copia de {title}', { title: displayProjectTitle(state) });
+  copy.status = "active";
+  copy.created_at = n;
+  copy.updated_at = n;
+  ensureUniqueTaskIds(copy.tasks || [], new Set());
+  state = normalizeProject(copy);
+  library.projects.unshift(state);
+  library.active_project_id = state.id;
+  saveState({ touch: false });
+  render();
+  setStatus(TF('status.project.duplicated', 'Proyecto duplicado.'), "ok");
+}
+
+function toggleArchiveActiveProject() {
+  state.status = state.status === "archived" ? "active" : "archived";
+  saveState();
+  render();
+  setStatus(state.status === "archived" ? TF('status.project.archived', 'Proyecto archivado.') : TF('status.project.restored', 'Proyecto restaurado.'), "ok");
+}
+
+function deleteActiveProject() {
+  if (!confirm(TF('confirm.deleteProject', '¿Borrar este proyecto y todas sus tareas y subtareas? Esta acción no se puede deshacer.'))) return;
+  const id = state.id;
+  library.projects = library.projects.filter(p => p.id !== id);
+  if (!library.projects.length) library.projects.push(newProject());
+  const next = library.projects.find(p => p.status !== "archived") || library.projects[0];
+  state = next;
+  library.active_project_id = state.id;
+  saveState({ touch: false });
+  render();
+  setStatus(TF('status.project.deleted', 'Proyecto eliminado.'), "ok");
+}
+
+// -----------------------------------------------------------------------------
+// Exportación/importación
+// -----------------------------------------------------------------------------
+function buildProjectExportPayload(project = state) {
   return {
-    schema_version: EXPORT_SCHEMA_VERSION,
+    schema_version: EXPORT_PROJECT_SCHEMA_VERSION,
     app_version: APP_VERSION,
-    exported_at: new Date().toISOString(),
-    plan: state
+    exported_at: nowIso(),
+    project
   };
 }
 
-function extractPlanFromImport(payload) {
-  if (payload && typeof payload === "object" && payload.plan && typeof payload.plan === "object") {
-    return payload.plan;
-  }
+function buildLibraryExportPayload() {
+  syncStateIntoLibrary({ touch: false });
+  return {
+    schema_version: EXPORT_LIBRARY_SCHEMA_VERSION,
+    app_version: APP_VERSION,
+    exported_at: nowIso(),
+    active_project_id: library.active_project_id,
+    projects: library.projects
+  };
+}
+
+function extractProjectFromImport(payload) {
+  if (payload && typeof payload === "object" && payload.project && typeof payload.project === "object") return payload.project;
+  if (payload && typeof payload === "object" && payload.plan && typeof payload.plan === "object") return payload.plan;
   return payload;
 }
 
-function planToMarkdown() {
+function projectToMarkdown(project = state) {
   const lines = [];
-  lines.push(`# ${state.title || T('meta.noTitle')}`);
-  if (state.category)             lines.push("", `${T('meta.category')}: ${state.category}`);
-  if (state.summary)              lines.push("", state.summary);
-  if (state.estimated_total_time) lines.push("", `${T('meta.totalTime')}: ${state.estimated_total_time}`);
-  if (state.difficulty)           lines.push(`${T('meta.difficulty')}: ${state.difficulty}`);
+  lines.push(`# ${project.title || T('meta.noTitle')}`);
+  if (project.category)             lines.push("", `${T('meta.category')}: ${project.category}`);
+  if (project.summary)              lines.push("", project.summary);
+  if (project.estimated_total_time) lines.push("", `${T('meta.totalTime')}: ${project.estimated_total_time}`);
+  if (project.difficulty)           lines.push(`${T('meta.difficulty')}: ${project.difficulty}`);
   lines.push("");
 
   function walk(tasks, depth = 0) {
@@ -865,7 +1168,7 @@ function planToMarkdown() {
     }
   }
 
-  walk(state.tasks);
+  walk(project.tasks || []);
   return lines.join("\n");
 }
 
@@ -881,8 +1184,32 @@ function downloadText(filename, content, mime) {
   URL.revokeObjectURL(url);
 }
 
+function importPayload(payload) {
+  syncStateIntoLibrary({ touch: false });
+  let imported = [];
+
+  if (payload && typeof payload === "object" && Array.isArray(payload.projects)) {
+    imported = payload.projects.slice(0, 250).map(p => normalizeProject(p));
+  } else {
+    imported = [normalizeProject(extractProjectFromImport(payload))];
+  }
+
+  const existingIds = new Set(library.projects.map(p => p.id));
+  for (const project of imported) {
+    if (!project.title) project.title = TF('projects.importedTitle', 'Proyecto importado');
+    if (existingIds.has(project.id)) project.id = freshId("project", existingIds);
+    existingIds.add(project.id);
+    project.created_at = project.created_at || nowIso();
+    project.updated_at = nowIso();
+    library.projects.unshift(project);
+  }
+  state = imported[0];
+  library.active_project_id = state.id;
+  saveState({ touch: false });
+}
+
 // -----------------------------------------------------------------------------
-// Diálogo de expansión de rama
+// Diálogo de expansión de tarea
 // -----------------------------------------------------------------------------
 function openBranchDialog(task) {
   uiState.branchTargetId = task.id;
@@ -899,6 +1226,12 @@ function setBranchBusy(busy) {
   els.branchRunBtn.classList.toggle("is-cancel", busy);
 }
 
+function normalizeBranch(payload) {
+  const safe = payload && typeof payload === "object" ? payload : {};
+  const arr = Array.isArray(safe.tasks) ? safe.tasks : [];
+  return ensureUniqueTaskIds(arr.slice(0, 60).map((t, i) => normalizeTask(t, i, 1)));
+}
+
 async function runBranchExpansion() {
   if (activeBranchController) {
     activeBranchController.abort();
@@ -906,9 +1239,9 @@ async function runBranchExpansion() {
     return;
   }
 
-  const targetId = uiState.branchTargetId;
-  const target = targetId ? findTaskById(state.tasks, targetId) : null;
-  if (!target) { els.branchDialog.close(); return; }
+  const found = uiState.branchTargetId ? findTaskById(state.tasks, uiState.branchTargetId) : null;
+  const target = found ? found.task : null;
+  if (!target || found.depth !== 0) { els.branchDialog.close(); return; }
 
   const settings = loadSettings();
   const replace = els.branchReplaceToggle.checked;
@@ -920,11 +1253,11 @@ async function runBranchExpansion() {
   try {
     const raw = await window.CumploOllama.chat({
       system: buildSystemPromptBranch(lang),
-      user:   buildBranchUserPrompt({
-        parentTitle:       target.title,
+      user: buildBranchUserPrompt({
+        parentTitle: target.title,
         parentDescription: target.description,
-        spice:             uiState.branchSpice,
-        profile:           els.profileSelect.value,
+        spice: uiState.branchSpice,
+        profile: els.profileSelect.value,
         lang
       }),
       options: { temperature: Number(settings.temperature) },
@@ -937,7 +1270,7 @@ async function runBranchExpansion() {
     if (replace) target.subtasks = newSubs;
     else target.subtasks = (target.subtasks || []).concat(newSubs);
     target.collapsed = false;
-    ensureUniqueIds(state.tasks);
+    ensureUniqueTaskIds(state.tasks);
 
     saveState();
     render();
@@ -945,11 +1278,8 @@ async function runBranchExpansion() {
     setStatus(T('status.branch.added', { n: newSubs.length, title: target.title }), "ok");
   } catch (error) {
     console.error(error);
-    if (activeBranchController && activeBranchController.signal.aborted) {
-      setStatus(T('status.cancelled'), "warn");
-    } else {
-      setStatus(T('status.error.prefix', { message: error.message }), "error");
-    }
+    if (activeBranchController && activeBranchController.signal.aborted) setStatus(T('status.cancelled'), "warn");
+    else setStatus(T('status.error.prefix', { message: error.message }), "error");
   } finally {
     activeBranchController = null;
     setBranchBusy(false);
@@ -957,7 +1287,7 @@ async function runBranchExpansion() {
 }
 
 // -----------------------------------------------------------------------------
-// Handler: generar desglose
+// Handler: generar proyecto
 // -----------------------------------------------------------------------------
 function setGenerateBusy(busy) {
   if (!els.generateBtn) return;
@@ -972,12 +1302,13 @@ async function runGenerate() {
     return;
   }
 
-  const task = els.taskInput.value.trim();
-  if (!task) { setStatus(T('status.error.empty'), "error"); return; }
-  if (task.length > 2000) { setStatus(T('status.error.tooLong'), "error"); return; }
+  const projectText = els.taskInput.value.trim();
+  if (!projectText) { setStatus(T('status.error.empty'), "error"); return; }
+  if (projectText.length > 2000) { setStatus(T('status.error.tooLong'), "error"); return; }
 
   const settings = loadSettings();
   const lang = window.I18N.lang;
+  const previous = state;
   activeGenerateController = new AbortController();
   setGenerateBusy(true);
   setStatus(T('status.generating'));
@@ -985,31 +1316,37 @@ async function runGenerate() {
   try {
     const raw = await window.CumploOllama.chat({
       system: buildSystemPrompt(lang),
-      user:   buildUserPrompt({ task, spice: uiState.spice, profile: els.profileSelect.value, lang }),
+      user: buildUserPrompt({ task: projectText, spice: uiState.spice, profile: els.profileSelect.value, lang }),
       options: { temperature: Number(settings.temperature) },
       signal: activeGenerateController.signal
     });
     const parsed = extractJson(raw);
-    state = normalizePlan(parsed);
-    saveState();
+    const n = nowIso();
+    state = normalizeProject({
+      ...parsed,
+      id: previous.id || uid("project"),
+      status: previous.status || "active",
+      created_at: previous.created_at || n,
+      updated_at: n
+    });
+    saveState({ touch: false });
     render();
     setStatus(T('status.generated'), "ok");
   } catch (error) {
     console.error(error);
-    if (activeGenerateController && activeGenerateController.signal.aborted) {
-      setStatus(T('status.cancelled'), "warn");
-    } else {
-      setStatus(T('status.error.prefix', { message: error.message }), "error");
-    }
+    if (activeGenerateController && activeGenerateController.signal.aborted) setStatus(T('status.cancelled'), "warn");
+    else setStatus(T('status.error.prefix', { message: error.message }), "error");
   } finally {
     activeGenerateController = null;
     setGenerateBusy(false);
   }
 }
 
+// -----------------------------------------------------------------------------
+// Handlers
+// -----------------------------------------------------------------------------
 els.generateBtn.addEventListener("click", runGenerate);
 
-// Atajo: Ctrl/Cmd + Enter en el textarea para desglosar
 els.taskInput.addEventListener("keydown", (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
     e.preventDefault();
@@ -1017,20 +1354,17 @@ els.taskInput.addEventListener("keydown", (e) => {
   }
 });
 
-// -----------------------------------------------------------------------------
-// Manual: añadir tarea sin modelo
-// -----------------------------------------------------------------------------
 els.addManualBtn.addEventListener("click", () => {
   const title = els.taskInput.value.trim() || T('prompt.newSubtask.manual');
   if (!state.title) {
-    state.title      = T('meta.noTitle');
-    state.summary    = "";
-    state.category   = "—";
+    state.title = TF('projects.manualTitle', 'Proyecto manual');
+    state.summary = "";
+    state.category = "—";
     state.difficulty = T('task.energy.unknown');
     state.estimated_total_time = T('task.time.unknown');
   }
   state.tasks.push({
-    id: uid("manual"),
+    id: uid("task"),
     title: title.slice(0, 240),
     emoji: "📝",
     description: "",
@@ -1046,28 +1380,26 @@ els.addManualBtn.addEventListener("click", () => {
   setStatus(T('status.added'), "ok");
 });
 
-// -----------------------------------------------------------------------------
-// Nuevo plan
-// -----------------------------------------------------------------------------
-els.newPlanBtn.addEventListener("click", () => {
-  const hasTasks = state.tasks.length > 0 || state.title;
-  if (hasTasks && !confirm(T('confirm.newPlan'))) return;
-  state = emptyState();
-  uiState.emojiFilter = null;
-  uiState.hideDone = false;
-  uiState.textFilter = "";
-  uiState.descEditingId = null;
-  els.hideDoneToggle.checked = false;
-  if (els.searchInput) els.searchInput.value = "";
-  els.taskInput.value = "";
-  saveState();
-  render();
-  setStatus(T('status.newPlan'), "ok");
-});
+els.newPlanBtn.addEventListener("click", createBlankProject);
+if (els.renameProjectBtn) els.renameProjectBtn.addEventListener("click", renameActiveProject);
+if (els.duplicateProjectBtn) els.duplicateProjectBtn.addEventListener("click", duplicateActiveProject);
+if (els.archiveProjectBtn) els.archiveProjectBtn.addEventListener("click", toggleArchiveActiveProject);
+if (els.deleteProjectBtn) els.deleteProjectBtn.addEventListener("click", deleteActiveProject);
 
-// -----------------------------------------------------------------------------
-// Exportar / importar (dialog)
-// -----------------------------------------------------------------------------
+if (els.projectSearchInput) {
+  els.projectSearchInput.addEventListener("input", debounce(() => {
+    uiState.projectFilter = els.projectSearchInput.value;
+    renderProjectSidebar();
+  }, 120));
+}
+if (els.showArchivedToggle) {
+  els.showArchivedToggle.addEventListener("change", () => {
+    uiState.showArchived = els.showArchivedToggle.checked;
+    renderProjectSidebar();
+  });
+}
+
+// Exportar / importar
 els.exportBtn.addEventListener("click", () => els.exportDialog.showModal());
 els.exportCloseBtn.addEventListener("click", () => els.exportDialog.close());
 
@@ -1077,23 +1409,32 @@ els.dlgExportMarkdownBtn.addEventListener("click", () => {
     els.exportDialog.close();
     return;
   }
-  const file = "cumplo-plan.md";
-  downloadText(file, planToMarkdown(), "text/markdown;charset=utf-8");
+  const file = `${slugForFile(state.title, "cumplo-project")}.md`;
+  downloadText(file, projectToMarkdown(state), "text/markdown;charset=utf-8");
   els.exportDialog.close();
   setStatus(T('status.exportedMd', { file }), "ok");
 });
 
 els.dlgExportJsonBtn.addEventListener("click", () => {
-  if (!state.tasks.length) {
+  if (!state.tasks.length && !state.title) {
     setStatus(T('status.export.empty'), "error");
     els.exportDialog.close();
     return;
   }
-  const file = "cumplo-plan.json";
-  downloadText(file, JSON.stringify(buildExportPayload(), null, 2), "application/json;charset=utf-8");
+  const file = `${slugForFile(state.title, "cumplo-project")}.json`;
+  downloadText(file, JSON.stringify(buildProjectExportPayload(state), null, 2), "application/json;charset=utf-8");
   els.exportDialog.close();
   setStatus(T('status.exportedJson', { file }), "ok");
 });
+
+if (els.dlgExportAllJsonBtn) {
+  els.dlgExportAllJsonBtn.addEventListener("click", () => {
+    const file = "cumplo-projects.json";
+    downloadText(file, JSON.stringify(buildLibraryExportPayload(), null, 2), "application/json;charset=utf-8");
+    els.exportDialog.close();
+    setStatus(TF('status.exportedAllJson', 'Biblioteca de proyectos exportada como {file}.', { file }), "ok");
+  });
+}
 
 els.dlgImportInput.addEventListener("change", async event => {
   const file = event.target.files[0];
@@ -1104,8 +1445,7 @@ els.dlgImportInput.addEventListener("change", async event => {
     }
     const text = await file.text();
     const parsed = JSON.parse(text);
-    state = normalizePlan(extractPlanFromImport(parsed));
-    saveState();
+    importPayload(parsed);
     render();
     els.exportDialog.close();
     setStatus(T('status.imported'), "ok");
@@ -1116,9 +1456,7 @@ els.dlgImportInput.addEventListener("change", async event => {
   }
 });
 
-// -----------------------------------------------------------------------------
-// Borrar TODO (reset total)
-// -----------------------------------------------------------------------------
+// Reset total
 els.clearDataBtn.addEventListener("click", () => {
   if (!confirm(T('confirm.clearAll'))) return;
   try {
@@ -1129,20 +1467,24 @@ els.clearDataBtn.addEventListener("click", () => {
     console.warn("Cumplø: localStorage no accesible al limpiar", e);
   }
   try { window.CumploOllama.writeActiveModel(null); } catch {}
-  state = emptyState();
+  library = emptyLibrary();
+  state = newProject();
+  library.projects = [state];
+  library.active_project_id = state.id;
   uiState.emojiFilter = null;
   uiState.hideDone = false;
   uiState.textFilter = "";
+  uiState.projectFilter = "";
+  uiState.showArchived = false;
   uiState.descEditingId = null;
   if (els.hideDoneToggle) els.hideDoneToggle.checked = false;
+  if (els.showArchivedToggle) els.showArchivedToggle.checked = false;
   if (els.searchInput) els.searchInput.value = "";
+  if (els.projectSearchInput) els.projectSearchInput.value = "";
   render();
   setStatus(T('status.cleared'), "ok");
 });
 
-// -----------------------------------------------------------------------------
-// Otros handlers
-// -----------------------------------------------------------------------------
 els.expandAllBtn.addEventListener("click", () => {
   setAllCollapsed(state.tasks, false);
   saveState();
@@ -1160,15 +1502,11 @@ els.hideDoneToggle.addEventListener("change", () => {
   render();
 });
 
-// Filtro de texto (debounced)
 const onSearchInput = debounce(() => {
   uiState.textFilter = els.searchInput.value;
   render();
 }, 150);
-
-if (els.searchInput) {
-  els.searchInput.addEventListener("input", onSearchInput);
-}
+if (els.searchInput) els.searchInput.addEventListener("input", onSearchInput);
 
 els.openSettingsBtn.addEventListener("click", () => {
   const s = loadSettings();
@@ -1203,6 +1541,7 @@ els.branchCancelBtn.addEventListener("click", () => {
   if (activeBranchController) activeBranchController.abort();
   els.branchDialog.close();
 });
+
 if (els.ephemeralToggle) {
   els.ephemeralToggle.addEventListener("change", () => {
     const settings = loadSettings();
@@ -1228,9 +1567,7 @@ if (els.retryOllamaBtn) {
   });
 }
 
-// -----------------------------------------------------------------------------
-// Botón Apagar (sin innerHTML + estilos inline; respeta la CSP estricta)
-// -----------------------------------------------------------------------------
+// Botón Apagar
 els.shutdownBtn.addEventListener("click", async () => {
   if (!confirm(T('confirm.shutdown'))) return;
   try {
@@ -1242,25 +1579,18 @@ els.shutdownBtn.addEventListener("click", async () => {
 });
 
 function renderShutdownScreen() {
-  // Reemplazamos el cuerpo construyendo nodos DOM con clases CSS, no con
-  // estilos inline: la CSP estricta (style-src 'self') bloquearía los inline.
   document.body.innerHTML = "";
   const wrap = document.createElement("div");
   wrap.className = "shutdown-screen";
-
   const h1 = document.createElement("h1");
   h1.textContent = T('shutdown.title');
-
   const p = document.createElement("p");
   p.textContent = T('shutdown.message');
-
   wrap.append(h1, p);
   document.body.appendChild(wrap);
 }
 
-// -----------------------------------------------------------------------------
-// Conmutador de idioma
-// -----------------------------------------------------------------------------
+// Idioma
 function refreshLangButtons() {
   const current = window.I18N.lang;
   langBtns.forEach(btn => {
@@ -1273,9 +1603,6 @@ langBtns.forEach(btn => {
   btn.addEventListener("click", () => window.I18N.set(btn.dataset.lang));
 });
 
-// -----------------------------------------------------------------------------
-// Reaccionar a cambios de idioma: re-renderizar todo lo dinámico
-// -----------------------------------------------------------------------------
 document.addEventListener("cumplo:lang-changed", () => {
   refreshLangButtons();
   setSpice(uiState.spice);
@@ -1289,36 +1616,24 @@ document.addEventListener("cumplo:lang-changed", () => {
   render();
 });
 
-// -----------------------------------------------------------------------------
-// Listener del estado de Ollama
-// -----------------------------------------------------------------------------
 document.addEventListener("cumplo:ollama-changed", () => {
   renderOllamaStatus();
   renderOllamaDiagnostics();
   if (els.settingsDialog && els.settingsDialog.open) renderModelSelect();
 });
 
-// -----------------------------------------------------------------------------
-// Versión en el footer (leída del propio servidor local)
-// -----------------------------------------------------------------------------
 async function loadFooterVersion() {
   if (!els.footerVersion) return;
   try {
     const res = await fetch("/__cumplo_health", { method: "GET" });
     if (!res.ok) return;
     const data = await res.json();
-    if (data && data.version) {
-      els.footerVersion.textContent = "v" + data.version;
-    }
-  } catch {
-    // sin conexión al servidor (modo offline puro: file://) → footer queda con "—"
-  }
+    if (data && data.version) els.footerVersion.textContent = "v" + data.version;
+  } catch {}
 }
 
-// -----------------------------------------------------------------------------
 // Boot
-// -----------------------------------------------------------------------------
-window.I18N.apply();           // aplica traducciones a [data-i18n] estáticos
+window.I18N.apply();
 refreshLangButtons();
 loadState();
 setSpice(DEFAULT_SPICE);

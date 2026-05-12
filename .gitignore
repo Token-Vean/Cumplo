@@ -1,0 +1,27 @@
+# Local environment and caches
+.env
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Logs and runtime artifacts
+*.log
+logs/
+workspace/
+
+# Build/distribution artifacts
+dist/
+build/
+*.zip
+*.sha256
+*.sha256.txt
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

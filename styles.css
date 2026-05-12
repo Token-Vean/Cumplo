@@ -1,6 +1,6 @@
 /* =============================================================================
    Cumplø — styles.css
-   v0.7.0-beta · sistema de diseño profesional
+   v0.8.0-beta · sistema de diseño profesional
    - Paleta sage + crema (heredada y refinada)
    - Sistema de spacing en escala 4px
    - Tipografía Inter con jerarquía clara
@@ -1193,12 +1193,149 @@ input[type="file"] {
 
   /* Marca de pie de página impresa */
   .panel.tasks-panel::after {
-    content: "Cumplø — plan impreso · local · sin nube";
+    content: "Cumplø — proyecto impreso · local · sin nube";
     display: block;
     margin-top: 18px;
     text-align: right;
     font-size: 10px;
     color: #666;
     font-style: italic;
+  }
+}
+
+/* --- v0.8 project library ------------------------------------------------ */
+.workspace-grid {
+  display: grid;
+  grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
+  gap: var(--sp-6);
+  align-items: start;
+}
+
+.project-panel {
+  position: sticky;
+  top: var(--sp-5);
+  max-height: calc(100vh - 40px);
+  overflow: auto;
+}
+
+.project-controls {
+  display: grid;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-4);
+}
+
+.project-archive-toggle {
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: var(--panel-soft);
+}
+
+.projects-list {
+  display: grid;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-4);
+}
+
+.project-card {
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  background: var(--panel-strong);
+  box-shadow: var(--shadow-xs);
+  transition: border-color 120ms ease, box-shadow 120ms ease, transform 120ms ease;
+}
+
+.project-card.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft), var(--shadow-sm);
+}
+
+.project-card.archived {
+  opacity: 0.72;
+}
+
+.project-card-main {
+  width: 100%;
+  display: grid;
+  gap: 3px;
+  text-align: left;
+  padding: var(--sp-3);
+  border-radius: var(--radius-md);
+}
+
+.project-card-main:hover {
+  background: var(--accent-softer);
+}
+
+.project-card-title {
+  display: block;
+  font-size: var(--fs-14);
+  line-height: var(--lh-snug);
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.project-card-meta,
+.project-card-date {
+  display: block;
+  font-size: var(--fs-12);
+  color: var(--muted);
+  line-height: var(--lh-snug);
+}
+
+.project-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--sp-2);
+}
+
+.project-actions .btn {
+  width: 100%;
+  justify-content: center;
+  min-height: 34px;
+  padding: 7px 10px;
+  font-size: var(--fs-13);
+}
+
+.project-empty {
+  padding: var(--sp-3);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-soft);
+}
+
+.task-item.is-subtask .task-card {
+  background: linear-gradient(180deg, var(--panel-strong), var(--panel-soft));
+}
+
+@media (max-width: 960px) {
+  .workspace-grid {
+    grid-template-columns: 1fr;
+  }
+  .project-panel {
+    position: static;
+    max-height: none;
+  }
+}
+
+@media print {
+  .project-panel {
+    display: none !important;
+  }
+  .workspace-grid {
+    display: block;
+  }
+}
+
+@media (min-width: 961px) {
+  .workspace-grid > .project-panel {
+    grid-column: 1;
+    grid-row: 1 / span 3;
+  }
+  .workspace-grid > .composer,
+  .workspace-grid > .tasks-panel,
+  .workspace-grid > .utility-panel {
+    grid-column: 2;
   }
 }

@@ -6,7 +6,7 @@ Servidor HTTP estático limitado a localhost con dos endpoints internos
 (/__cumplo_health, /__cumplo_shutdown). No expone Cumplø en la red y no
 requiere dependencias externas.
 
-Patrón derivado de Compo v0.1.13, endurecido hasta 0.7.0-beta:
+Patrón derivado de Compo v0.1.13, endurecido hasta 0.8.0-beta:
 - Verificación de Origin / Sec-Fetch-Site en los endpoints internos.
 - Validación de Host en todas las respuestas (mitiga DNS rebinding).
 - Cabeceras de seguridad endurecidas: CSP, Permissions-Policy,
@@ -26,7 +26,7 @@ import threading
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-__version__ = "0.7.0-beta"
+__version__ = "0.8.0-beta"
 
 # Versión mínima de Python.
 if sys.version_info < (3, 8):
