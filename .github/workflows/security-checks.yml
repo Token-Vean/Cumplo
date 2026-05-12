@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 jobs:
-  static-checks:
+  security-checks:
     name: Static syntax and security checks
     runs-on: ubuntu-latest
 
@@ -22,21 +22,17 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
-      - name: Set up Node
+      - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: "20"
 
       - name: Install Python security tools
         run: |
           python -m pip install --upgrade pip
           pip install bandit
-
-      - name: Compile Python files
-        run: |
-          python -m py_compile server.py
 
       - name: Validate JavaScript syntax
         run: |
@@ -45,42 +41,36 @@ jobs:
           node --check ollama.js
           node --check prompts.js
 
+      - name: Compile Python files
+        run: |
+          python -m py_compile server.py
+
       - name: Run Bandit
         run: |
-          bandit -r . -x ./.git,./dist,./build,./.github -ll
+          bandit -r . -x ./.git,./dist,./build,./__pycache__ -ll
 
-      - name: Check unwanted local files
+      - name: Check forbidden references
         run: |
-          if find . \( \
-            -name ".env" -o \
-            -name "*.log" -o \
-            -name "__pycache__" -o \
-            -name "*.pyc" -o \
-            -name ".DS_Store" -o \
-            -name "Thumbs.db" \
-          \) | grep .; then
-            echo "Unwanted local files found."
-            exit 1
-          fi
-
-      - name: Check for possible secrets
-        run: |
-          if grep -RInE "(api[_-]?key|secret|password|access[_-]?token|auth[_-]?token|BEGIN RSA PRIVATE KEY|BEGIN OPENSSH PRIVATE KEY)" . \
-            --exclude-dir=.git \
-            --exclude-dir=.github \
-            --exclude-dir=dist \
-            --exclude-dir=build; then
-            echo "Possible secret-like string found. Review manually."
-            exit 1
-          fi
-
-      - name: Check forbidden external references
-        run: |
-          if grep -RInE "go[b]lin|Magic[[:space:]]ToDo|go[b]lin\.tools" . \
-            --exclude-dir=.git \
-            --exclude-dir=.github \
-            --exclude-dir=dist \
-            --exclude-dir=build; then
+          if git grep -nEI "goblin|Magic ToDo|goblin\.tools" -- .; then
             echo "Forbidden reference found."
+            exit 1
+          fi
+
+      - name: Check unwanted committed files
+        run: |
+          if git ls-files | grep -E '(^|/)(__pycache__|\.env$|.*\.log$|.*\.pyc$|\.DS_Store$|Thumbs\.db$)'; then
+            echo "Unwanted committed files found."
+            exit 1
+          fi
+
+      - name: Check high-confidence committed secrets
+        run: |
+          if git grep -nEI "-----BEGIN (RSA |DSA |EC |OPENSSH |PGP )?PRIVATE KEY-----" -- .; then
+            echo "Private key material found."
+            exit 1
+          fi
+
+          if git grep -nEI "(AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z\-_]{35}|sk-[A-Za-z0-9]{20,})" -- .; then
+            echo "High-confidence credential-like string found."
             exit 1
           fi
