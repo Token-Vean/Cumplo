@@ -1,4 +1,4 @@
-name: Security checks
+﻿name: Security checks
 
 on:
   push:
@@ -49,28 +49,33 @@ jobs:
         run: |
           bandit -r . -x ./.git,./dist,./build,./__pycache__ -ll
 
-      - name: Check forbidden references
+      - name: Check unwanted external references
         run: |
-          if git grep -nEI "goblin|Magic ToDo|goblin\.tools" -- .; then
-            echo "Forbidden reference found."
+          TERM_A="$(printf '\x67\x6f\x62\x6c\x69\x6e')"
+          TERM_B="$(printf '\x4d\x61\x67\x69\x63\x20\x54\x6f\x44\x6f')"
+          HOST_A="${TERM_A}$(printf '\x2e\x74\x6f\x6f\x6c\x73')"
+          PATTERN="${TERM_A}|${TERM_B}|${HOST_A}"
+
+          if git grep -nEI -e "$PATTERN" -- .; then
+            echo "Unwanted external reference found."
             exit 1
           fi
 
       - name: Check unwanted committed files
         run: |
           if git ls-files | grep -E '(^|/)(__pycache__|\.env$|.*\.log$|.*\.pyc$|\.DS_Store$|Thumbs\.db$)'; then
-            echo "Unwanted committed files found."
+            echo "Unwanted committed file found."
             exit 1
           fi
 
       - name: Check high-confidence committed secrets
         run: |
-          if git grep -nEI "-----BEGIN (RSA |DSA |EC |OPENSSH |PGP )?PRIVATE KEY-----" -- .; then
+          if git grep -nEI -e "-----BEGIN (RSA |DSA |EC |OPENSSH |PGP )?PRIVATE KEY-----" -- .; then
             echo "Private key material found."
             exit 1
           fi
 
-          if git grep -nEI "(AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z\-_]{35}|sk-[A-Za-z0-9]{20,})" -- .; then
+          if git grep -nEI -e "(AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z\-_]{35}|sk-[A-Za-z0-9]{20,})" -- .; then
             echo "High-confidence credential-like string found."
             exit 1
           fi
