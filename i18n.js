@@ -59,7 +59,9 @@
       'composer.label.spice':     'Nivel de desglose',
       'composer.label.profile':   'Perfil',
       'composer.generate':        'Desglosar tarea',
+      'composer.cancel':          'Cancelar generación',
       'composer.addManual':       'Añadir manualmente',
+      'composer.shortcut':        'Atajo: Ctrl + Enter para desglosar.',
 
       // Profile options
       'profile.general':          'General',
@@ -89,6 +91,8 @@
       'tasks.emptyState':         'No hay tareas. Crea una tarea nueva o importa un archivo JSON.',
       'tasks.filter.all':         'Todas ({n})',
       'tasks.filter.aria':        'Filtrar por categoría',
+      'tasks.search.placeholder': 'Buscar en tareas y descripciones…',
+      'tasks.search.aria':        'Buscar tareas',
 
       // Task meta cards
       'meta.plan':                'Plan',
@@ -102,6 +106,7 @@
       'task.energy':              'Energía: {value}',
       'task.energy.unknown':      'media',
       'task.time.unknown':        'sin estimación',
+      'task.title.aria':          'Título de la tarea',
       'task.action.expandMore':   '✨ Desglosar más',
       'task.action.expandMore.title': 'Pedirle al modelo local más subtareas de esta tarea',
       'task.action.addSub':       '+ Subtarea',
@@ -111,6 +116,8 @@
       'task.action.collapse':     'Contraer',
       'task.check.aria':          'Marcar como completada',
       'task.noDescription':       'Sin descripción.',
+      'task.descEditor.save':     'Guardar descripción',
+      'task.descEditor.cancel':   'Cancelar',
 
       // Confirmations
       'confirm.newPlan':          '¿Empezar un plan nuevo? Se descartarán todas las tareas actuales (los ajustes y el modelo activo se conservan).',
@@ -124,6 +131,8 @@
       // Status messages
       'status.generating':        'Generando desglose con Ollama local…',
       'status.generated':         'Tarea desglosada correctamente.',
+      'status.canceling':         'Cancelando generación…',
+      'status.cancelled':         'Generación cancelada.',
       'status.error.empty':       'Escribe una tarea principal antes de generar el desglose.',
       'status.error.tooLong':     'La tarea es demasiado larga. Reduce el texto inicial.',
       'status.error.prefix':      'Error: {message}',
@@ -140,6 +149,9 @@
       'status.settings.saved':    'Configuración guardada.',
       'status.detect.retrying':   'Reintentando detección…',
       'status.shutdown.failed':   'No se pudo apagar el servidor: {message}',
+      'status.save.quotaError':   'No se pudo guardar (almacenamiento lleno o navegación privada).',
+      'status.ephemeral.enabled': 'Modo efímero activado. El plan persistido se ha borrado.',
+      'status.ephemeral.disabled':'Modo efímero desactivado. El plan actual vuelve a guardarse localmente.',
 
       // Settings dialog
       'settings.title':           'Configuración',
@@ -160,6 +172,7 @@
       'branch.replace':           'Sustituir subtareas existentes (por defecto se añaden)',
       'branch.cancel':            'Cancelar',
       'branch.run':               'Desglosar',
+      'branch.cancelGeneration':  'Cancelar generación',
 
       // Export dialog
       'export.title':             'Exportar plan',
@@ -176,18 +189,33 @@
       'util.clearAll':            'Borrar todos los datos',
       'util.clearAll.title':      'Borra TODO: tareas, modelo activo y preferencias',
       'util.privacy.summary':     'Privacidad y funcionamiento',
-      'util.privacy.p1':          'Cumplø no incluye analítica, cookies ni dependencias externas. Las tareas se guardan en el almacenamiento local del navegador. La generación automática requiere Ollama ejecutándose en este mismo equipo.',
+      'util.privacy.p1':          'Cumplø no incluye analítica, cookies ni dependencias externas. Las tareas se guardan en el almacenamiento local del navegador salvo que actives el modo efímero. La generación automática requiere Ollama ejecutándose en este mismo equipo.',
       'util.privacy.p2':          'El servidor local solo escucha en 127.0.0.1, está protegido por una CSP estricta y solo permite hablar con Ollama en su puerto 11434.',
+      'util.ephemeral.label':     'Modo efímero: no guardar tareas en este navegador',
+      'util.ephemeral.hint':      'Al activarlo, Cumplø borra el plan persistido y mantiene los cambios solo en memoria hasta cerrar o recargar la pestaña.',
       'util.noOllama.summary':    '¿No conecta con Ollama?',
       'util.noOllama.intro':      'La causa habitual es que la variable de entorno OLLAMA_ORIGINS no incluye el origen de esta aplicación. Es un ajuste único en cada equipo:',
       'util.noOllama.win':        'Windows: Inicio → "Variables de entorno" → variable de usuario OLLAMA_ORIGINS con valor http://127.0.0.1:8765,http://localhost:8765. Cierra y reabre Ollama.',
       'util.noOllama.mac':        'macOS: launchctl setenv OLLAMA_ORIGINS "http://127.0.0.1:8765,http://localhost:8765" y reinicia Ollama desde la barra de menú.',
       'util.noOllama.linux':      'Linux (systemd): sudo systemctl edit ollama.service y añade Environment="OLLAMA_ORIGINS=http://127.0.0.1:8765,http://localhost:8765". Después sudo systemctl restart ollama.',
+      'util.noOllama.retry':      'Reintentar detección',
       'util.noOllama.docs':       'El detalle completo está en docs/INSTALAR-OLLAMA.es.md.',
+      'diag.status':              'Estado',
+      'diag.status.checking':     'comprobando',
+      'diag.status.ok':           'Ollama detectado',
+      'diag.status.fail':         'Ollama no detectado',
+      'diag.models':              'Modelos detectados',
+      'diag.activeModel':         'Modelo activo',
+      'diag.origin':              'Origen actual',
+      'diag.recommendedOrigins':  'OLLAMA_ORIGINS recomendado',
+      'diag.lastError':           'Último error',
 
       // Shutdown screen
       'shutdown.title':           'Cumplø apagado',
       'shutdown.message':         'Puedes cerrar esta pestaña. El servidor local se ha detenido.',
+
+      // Footer
+      'footer.tagline':           'Local · Sin nube · MIT',
 
       // Ollama errors (used from ollama.js)
       'err.aborted.generate':     'La generación local ha superado el tiempo máximo. Prueba con un modelo más ligero, reduce la tarea de entrada o vuelve a intentarlo.',
@@ -205,6 +233,7 @@
       'err.unparseable':          'Ollama devolvió una respuesta no interpretable. Vuelve a intentarlo o cambia de modelo.',
       'err.parser.noJson':        'El modelo no devolvió JSON válido.',
       'err.parser.noSubs':        'El modelo no devolvió subtareas utilizables.',
+      'err.import.tooLarge':      'El archivo supera el límite de {mb} MB.',
       'err.unknown':              'Error desconocido al comunicarse con Ollama.'
     },
 
@@ -243,7 +272,9 @@
       'composer.label.spice':     'Breakdown level',
       'composer.label.profile':   'Profile',
       'composer.generate':        'Break down task',
+      'composer.cancel':          'Cancel generation',
       'composer.addManual':       'Add manually',
+      'composer.shortcut':        'Shortcut: Ctrl + Enter to break down.',
 
       // Profile options
       'profile.general':          'General',
@@ -273,6 +304,8 @@
       'tasks.emptyState':         'No tasks. Create a new one or import a JSON file.',
       'tasks.filter.all':         'All ({n})',
       'tasks.filter.aria':        'Filter by category',
+      'tasks.search.placeholder': 'Search in tasks and descriptions…',
+      'tasks.search.aria':        'Search tasks',
 
       // Task meta cards
       'meta.plan':                'Plan',
@@ -295,6 +328,8 @@
       'task.action.collapse':     'Collapse',
       'task.check.aria':          'Mark as completed',
       'task.noDescription':       'No description.',
+      'task.descEditor.save':     'Save description',
+      'task.descEditor.cancel':   'Cancel',
 
       // Confirmations
       'confirm.newPlan':          'Start a new plan? All current tasks will be discarded (settings and active model are kept).',
@@ -308,6 +343,8 @@
       // Status messages
       'status.generating':        'Generating breakdown with local Ollama…',
       'status.generated':         'Task broken down successfully.',
+      'status.canceling':         'Cancelling generation…',
+      'status.cancelled':         'Generation cancelled.',
       'status.error.empty':       'Write a main task before generating the breakdown.',
       'status.error.tooLong':     'The task is too long. Shorten the initial text.',
       'status.error.prefix':      'Error: {message}',
@@ -324,6 +361,9 @@
       'status.settings.saved':    'Settings saved.',
       'status.detect.retrying':   'Retrying detection…',
       'status.shutdown.failed':   'Could not shut down the server: {message}',
+      'status.save.quotaError':   'Could not save (storage full or private browsing).',
+      'status.ephemeral.enabled': 'Ephemeral mode enabled. The persisted plan has been deleted.',
+      'status.ephemeral.disabled':'Ephemeral mode disabled. The current plan is stored locally again.',
 
       // Settings dialog
       'settings.title':           'Settings',
@@ -344,6 +384,7 @@
       'branch.replace':           'Replace existing subtasks (by default they are appended)',
       'branch.cancel':            'Cancel',
       'branch.run':               'Break down',
+      'branch.cancelGeneration':  'Cancel generation',
 
       // Export dialog
       'export.title':             'Export plan',
@@ -360,18 +401,33 @@
       'util.clearAll':            'Delete all data',
       'util.clearAll.title':      'Delete EVERYTHING: tasks, active model and preferences',
       'util.privacy.summary':     'Privacy and how it works',
-      'util.privacy.p1':          'Cumplø has no analytics, no cookies and no external dependencies. Tasks are stored in the browser\u2019s local storage. Automatic generation requires Ollama running on this same machine.',
+      'util.privacy.p1':          'Cumplø has no analytics, no cookies and no external dependencies. Tasks are stored in the browser\u2019s local storage unless you enable ephemeral mode. Automatic generation requires Ollama running on this same machine.',
       'util.privacy.p2':          'The local server only listens on 127.0.0.1, is protected by a strict CSP and only allows talking to Ollama on its port 11434.',
+      'util.ephemeral.label':     'Ephemeral mode: do not store tasks in this browser',
+      'util.ephemeral.hint':      'When enabled, Cumplø deletes the persisted plan and keeps changes in memory only until the tab is closed or reloaded.',
       'util.noOllama.summary':    'Not connecting to Ollama?',
       'util.noOllama.intro':      'The usual cause is that the OLLAMA_ORIGINS environment variable does not include this app\u2019s origin. It is a one-off setting per machine:',
       'util.noOllama.win':        'Windows: Start → "Environment variables" → user variable OLLAMA_ORIGINS with value http://127.0.0.1:8765,http://localhost:8765. Quit and reopen Ollama.',
       'util.noOllama.mac':        'macOS: launchctl setenv OLLAMA_ORIGINS "http://127.0.0.1:8765,http://localhost:8765" and restart Ollama from the menu bar.',
       'util.noOllama.linux':      'Linux (systemd): sudo systemctl edit ollama.service and add Environment="OLLAMA_ORIGINS=http://127.0.0.1:8765,http://localhost:8765". Then sudo systemctl restart ollama.',
+      'util.noOllama.retry':      'Retry detection',
       'util.noOllama.docs':       'Full details in docs/INSTALAR-OLLAMA.es.md.',
+      'diag.status':              'Status',
+      'diag.status.checking':     'checking',
+      'diag.status.ok':           'Ollama detected',
+      'diag.status.fail':         'Ollama not detected',
+      'diag.models':              'Detected models',
+      'diag.activeModel':         'Active model',
+      'diag.origin':              'Current origin',
+      'diag.recommendedOrigins':  'Recommended OLLAMA_ORIGINS',
+      'diag.lastError':           'Last error',
 
       // Shutdown screen
       'shutdown.title':           'Cumplø stopped',
       'shutdown.message':         'You can close this tab. The local server has been stopped.',
+
+      // Footer
+      'footer.tagline':           'Local · No cloud · MIT',
 
       // Ollama errors
       'err.aborted.generate':     'Local generation exceeded the time limit. Try a lighter model, shorten the input task or retry.',
@@ -389,6 +445,7 @@
       'err.unparseable':          'Ollama returned an unreadable response. Retry or switch model.',
       'err.parser.noJson':        'The model did not return valid JSON.',
       'err.parser.noSubs':        'The model did not return usable subtasks.',
+      'err.import.tooLarge':      'The file exceeds the {mb} MB limit.',
       'err.unknown':              'Unknown error while talking to Ollama.'
     }
   };

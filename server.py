@@ -6,8 +6,9 @@ Servidor HTTP estático limitado a localhost con dos endpoints internos
 (/__cumplo_health, /__cumplo_shutdown). No expone Cumplø en la red y no
 requiere dependencias externas.
 
-Patrón derivado de Compo v0.1.13:
+Patrón derivado de Compo v0.1.13, endurecido hasta 0.7.0-beta:
 - Verificación de Origin / Sec-Fetch-Site en los endpoints internos.
+- Validación de Host en todas las respuestas (mitiga DNS rebinding).
 - Cabeceras de seguridad endurecidas: CSP, Permissions-Policy,
   Cross-Origin-Opener-Policy, Cross-Origin-Resource-Policy.
 - El header Server: no revela versión específica.
@@ -25,7 +26,7 @@ import threading
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-__version__ = "0.5.0"
+__version__ = "0.7.0-beta"
 
 # Versión mínima de Python.
 if sys.version_info < (3, 8):
@@ -39,6 +40,14 @@ if sys.version_info < (3, 8):
 ALLOWED_ORIGINS_TEMPLATE = (
     "http://localhost:{port}",
     "http://127.0.0.1:{port}",
+)
+
+# Hosts permitidos en el header Host. Mitiga DNS rebinding: si una página
+# maliciosa intenta hablar con 127.0.0.1 a través de un dominio rebound, el
+# header Host llevará su dominio y no coincidirá con esta lista.
+ALLOWED_HOSTS_TEMPLATE = (
+    "127.0.0.1:{port}",
+    "localhost:{port}",
 )
 
 # Content Security Policy. Solo permitimos conectar a Ollama en su puerto
@@ -73,6 +82,7 @@ class CumploServer(ThreadingHTTPServer):
     allow_reuse_address = True
     daemon_threads = True
     allowed_origins = ()
+    allowed_hosts = ()
 
 
 class CumploHandler(SimpleHTTPRequestHandler):
@@ -87,6 +97,15 @@ class CumploHandler(SimpleHTTPRequestHandler):
         self.send_header("Cross-Origin-Resource-Policy", "same-origin")
         self.send_header("Content-Security-Policy", CSP)
         super().end_headers()
+
+    def _host_ok(self):
+        """Valida que el header Host venga de una de las direcciones esperadas
+        (mitigación de DNS rebinding). Una página maliciosa rebound a 127.0.0.1
+        seguiría enviando su propio dominio en Host."""
+        host = (self.headers.get("Host") or "").strip().lower()
+        if not host:
+            return False
+        return host in self.server.allowed_hosts
 
     def _origin_ok(self):
         """Acepta endpoints internos solo si Origin o Sec-Fetch-Site demuestran
@@ -111,6 +130,12 @@ class CumploHandler(SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):  # noqa: N802
+        # Defensa DNS rebinding: si el Host no es uno de los esperados, no
+        # servimos nada. 421 (Misdirected Request) es semánticamente correcto.
+        if not self._host_ok():
+            self.send_error(421, "Misdirected Request")
+            return
+
         path = self.path.split("?", 1)[0]
         if path == "/__cumplo_health":
             if not self._origin_ok():
@@ -124,6 +149,11 @@ class CumploHandler(SimpleHTTPRequestHandler):
         super().do_GET()
 
     def do_POST(self):  # noqa: N802
+        # Defensa DNS rebinding también en POST.
+        if not self._host_ok():
+            self.send_error(421, "Misdirected Request")
+            return
+
         path = self.path.split("?", 1)[0]
         if path != "/__cumplo_shutdown":
             self.send_error(404, "Not found")
@@ -194,6 +224,9 @@ def main():
     server = _bind_server(args.host, args.port, CumploHandler)
     server.allowed_origins = tuple(
         tpl.format(port=args.port) for tpl in ALLOWED_ORIGINS_TEMPLATE
+    )
+    server.allowed_hosts = tuple(
+        tpl.format(port=args.port) for tpl in ALLOWED_HOSTS_TEMPLATE
     )
 
     url = f"http://{args.host}:{args.port}/index.html"

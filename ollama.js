@@ -5,7 +5,7 @@
    servidor restringe connect-src a ese origen para que esta promesa sea
    verificable por el usuario.
 
-   Patrón derivado de Compo v0.1.13.
+   Patrón de cliente local con CSP estricta y conexión limitada a Ollama.
    =========================================================================== */
 
 (function () {
@@ -107,11 +107,13 @@
         if (!res.ok) {
           this.available = false;
           this.models = [];
+          this.lastDetectError = friendlyHttpError(res.status, '', 'detect');
           this.notify();
           return false;
         }
         const data = await res.json();
         this.available = true;
+        this.lastDetectError = null;
         this.models = Array.isArray(data.models) ? data.models : [];
         if (!this.activeModel || !this.hasModel(this.activeModel)) {
           this.activeModel = this.pickDefaultModel();

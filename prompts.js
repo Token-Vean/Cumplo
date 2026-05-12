@@ -53,7 +53,7 @@ const EMOJI_GUIDE = "Pick ONE emoji per task from this list: 📝 ✉️ 📞 �
 function buildSystemPrompt(lang) {
   const L = (lang === 'en') ? 'en' : 'es';
   return `
-You are a local task-planning assistant inspired by the "Magic ToDo" pattern.
+You are Cumplø, a local task-planning assistant for converting broad goals into clear, ordered and actionable work plans.
 
 Your job is to break a high-level task into clear, ordered, actionable steps.
 

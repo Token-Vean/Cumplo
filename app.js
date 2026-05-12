@@ -1,12 +1,23 @@
 // =============================================================================
-// Cumplø — app.js
+// Cumplø — app.js  ·  v0.7.0-beta
 // Estado, render y handlers. Tratamos la respuesta del modelo como entrada
-// no confiable: parsea, normaliza, recorta longitudes y nunca inserta HTML
-// generado por el modelo (sólo textContent / nodos DOM).
+// no confiable: parsea, normaliza, recorta longitudes, profundidad máxima,
+// y nunca inserta HTML generado por el modelo (solo textContent / nodos DOM).
 //
 // Bilingüe ES/EN: todos los strings dinámicos pasan por I18N.t(). El idioma
-// activo se inyecta también en los prompts enviados a Ollama, de modo que la
-// respuesta del modelo viene en el mismo idioma que la interfaz.
+// activo se inyecta también en los prompts enviados a Ollama.
+//
+// Cambios respecto a 0.5.0:
+//  - MAX_DEPTH en normalizeTask: cota dura contra anidación patológica.
+//  - saveState con try/catch: tolera QuotaExceededError y modo privado.
+//  - Pantalla de apagado construida con createElement (CSP-friendly, sin
+//    innerHTML + estilos inline).
+//  - Edición inline de la descripción (textarea en la tarjeta) en lugar de
+//    prompt() bloqueante.
+//  - Filtro de texto sobre títulos y descripciones (además del filtro emoji).
+//  - Atajo Ctrl/Cmd + Enter en el textarea para disparar "Desglosar tarea".
+//  - debounce del guardado del título en localStorage.
+//  - Versión visible en el footer, obtenida del propio servidor local.
 // =============================================================================
 
 // -----------------------------------------------------------------------------
@@ -14,12 +25,18 @@
 // -----------------------------------------------------------------------------
 const STORAGE_KEY  = "cumplo_state_v1";
 const SETTINGS_KEY = "cumplo_settings_v1";
+const EXPORT_SCHEMA_VERSION = "cumplo.plan.v1";
+const APP_VERSION = "0.7.0-beta";
 
 const LEGACY_STATE_KEYS    = ["tareas_locales_state_v1"];
 const LEGACY_SETTINGS_KEYS = ["tareas_locales_settings_v1"];
 
-const DEFAULT_SETTINGS = { temperature: 0.25 };
+const DEFAULT_SETTINGS = { temperature: 0.25, ephemeral: false };
 const DEFAULT_SPICE = 3;
+const MAX_DEPTH = 6;        // anidación máxima permitida al normalizar
+const SAVE_DEBOUNCE_MS = 300;
+const IMPORT_MAX_BYTES = 2 * 1024 * 1024; // 2 MB: evita bloqueos por JSON enormes
+const VALID_ID_RE = /^[a-z0-9][a-z0-9_.:-]{1,127}$/i;
 
 const ALLOWED_EMOJIS = new Set([
   "📝","✉️","📞","🗂️","📁","📚","🔎","💻","🛠️","🧮",
@@ -39,7 +56,9 @@ let uiState = {
   branchSpice: DEFAULT_SPICE,
   branchTargetId: null,
   hideDone: false,
-  emojiFilter: null
+  emojiFilter: null,
+  textFilter: "",
+  descEditingId: null   // id de la tarea con descripción en edición
 };
 
 function emptyState() {
@@ -67,7 +86,9 @@ const els = {
   tasksRoot:           document.getElementById("tasksRoot"),
   taskCount:           document.getElementById("taskCount"),
   taskMeta:            document.getElementById("taskMeta"),
+  taskToolbar:         document.getElementById("taskToolbar"),
   filterBar:           document.getElementById("filterBar"),
+  searchInput:         document.getElementById("searchInput"),
   hideDoneToggle:      document.getElementById("hideDoneToggle"),
   clearDataBtn:        document.getElementById("clearDataBtn"),
   newPlanBtn:          document.getElementById("newPlanBtn"),
@@ -94,10 +115,28 @@ const els = {
   branchRunBtn:        document.getElementById("branchRunBtn"),
   branchCancelBtn:     document.getElementById("branchCancelBtn"),
   ollamaStatus:        document.getElementById("ollamaStatus"),
-  shutdownBtn:         document.getElementById("shutdownBtn")
+  shutdownBtn:         document.getElementById("shutdownBtn"),
+  footerVersion:       document.getElementById("footerVersion"),
+  ephemeralToggle:     document.getElementById("ephemeralToggle"),
+  ollamaDiagnostics:   document.getElementById("ollamaDiagnostics"),
+  retryOllamaBtn:      document.getElementById("retryOllamaBtn")
 };
 
 const langBtns = document.querySelectorAll(".lang-btn");
+
+let activeGenerateController = null;
+let activeBranchController = null;
+
+// -----------------------------------------------------------------------------
+// Utilidad: debounce
+// -----------------------------------------------------------------------------
+function debounce(fn, ms) {
+  let t;
+  return function (...args) {
+    clearTimeout(t);
+    t = setTimeout(() => fn.apply(this, args), ms);
+  };
+}
 
 // -----------------------------------------------------------------------------
 // Settings de la app
@@ -118,15 +157,52 @@ function loadSettings() {
 }
 
 function saveSettings(settings) {
-  localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  const merged = { ...DEFAULT_SETTINGS, ...(settings || {}) };
+  try {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(merged));
+  } catch (e) {
+    console.warn("Cumplø: no se pudieron guardar las preferencias", e);
+    setStatus(T('status.save.quotaError'), "error");
+  }
 }
 
 // -----------------------------------------------------------------------------
 // Estado del plan
 // -----------------------------------------------------------------------------
-function saveState() { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
+function removePersistentState() {
+  try {
+    localStorage.removeItem(STORAGE_KEY);
+    for (const k of LEGACY_STATE_KEYS) localStorage.removeItem(k);
+  } catch (e) {
+    console.warn("Cumplø: no se pudo borrar el estado persistido", e);
+  }
+}
+
+function isEphemeralMode() {
+  return Boolean(loadSettings().ephemeral);
+}
+
+function saveState() {
+  if (isEphemeralMode()) {
+    removePersistentState();
+    return;
+  }
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  } catch (e) {
+    // Más probable: QuotaExceededError o modo privado con cuota a 0.
+    console.warn("Cumplø: no se pudo guardar el estado", e);
+    setStatus(T('status.save.quotaError'), "error");
+  }
+}
+
+const saveStateDebounced = debounce(saveState, SAVE_DEBOUNCE_MS);
 
 function loadState() {
+  if (isEphemeralMode()) {
+    removePersistentState();
+    return;
+  }
   try {
     let raw = localStorage.getItem(STORAGE_KEY);
     let migrated = false;
@@ -156,6 +232,29 @@ function uid(prefix = "t") {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function normalizeInternalId(value, prefix = "t") {
+  const v = String(value || "").trim();
+  return VALID_ID_RE.test(v) ? v : uid(prefix);
+}
+
+function freshId(prefix, seen) {
+  let id;
+  do { id = uid(prefix); } while (seen.has(id));
+  return id;
+}
+
+function ensureUniqueIds(tasks, seen = new Set()) {
+  for (const task of tasks || []) {
+    if (!task || typeof task !== "object") continue;
+    if (!task.id || seen.has(task.id) || !VALID_ID_RE.test(task.id)) {
+      task.id = freshId("t", seen);
+    }
+    seen.add(task.id);
+    ensureUniqueIds(task.subtasks || [], seen);
+  }
+  return tasks;
+}
+
 function stripCodeFences(text) {
   return String(text || "")
     .replace(/^```(?:json)?/i, "")
@@ -176,8 +275,7 @@ function extractJson(text) {
   }
 }
 
-// Acepta "baja|media|alta" y "low|medium|high"; normaliza a un valor canónico
-// según el idioma actual (lo que se muestra al usuario).
+// Acepta "baja|media|alta" y "low|medium|high"; normaliza al idioma actual.
 const ENERGY_MAP = {
   baja: { es: 'baja', en: 'low' },     low:    { es: 'baja', en: 'low' },
   media:{ es: 'media', en: 'medium' }, medium: { es: 'media', en: 'medium' },
@@ -187,7 +285,7 @@ const ENERGY_MAP = {
 function normalizeEnergy(value) {
   const key = String(value || '').toLowerCase();
   if (ENERGY_MAP[key]) return ENERGY_MAP[key][window.I18N.lang] || ENERGY_MAP[key].es;
-  return T('task.energy.unknown');  // "media" / "medium"
+  return T('task.energy.unknown');
 }
 
 function normalizeEmoji(value) {
@@ -199,13 +297,15 @@ function normalizeEmoji(value) {
   return "📝";
 }
 
-function normalizeTask(task, index = 0) {
+function normalizeTask(task, index = 0, depth = 0) {
   const safe = task && typeof task === "object" ? task : {};
-  const subtasks = Array.isArray(safe.subtasks)
-    ? safe.subtasks.slice(0, 40).map((t, i) => normalizeTask(t, i))
+  // Cota dura de anidación. Si llegamos al límite, descartamos subtareas
+  // ulteriores: evita stack overflow con JSON malicioso o muy profundo.
+  const subtasks = (depth < MAX_DEPTH && Array.isArray(safe.subtasks))
+    ? safe.subtasks.slice(0, 40).map((t, i) => normalizeTask(t, i, depth + 1))
     : [];
   return {
-    id:             typeof safe.id === "string" && safe.id.trim() ? safe.id.trim() : uid(`t${index}`),
+    id:             normalizeInternalId(safe.id, `t${index}`),
     title:          String(safe.title || T('prompt.newSubtask.title')).slice(0, 240),
     emoji:          normalizeEmoji(safe.emoji),
     description:    String(safe.description || "").slice(0, 1000),
@@ -220,8 +320,9 @@ function normalizeTask(task, index = 0) {
 function normalizePlan(plan) {
   const safe = plan && typeof plan === "object" ? plan : {};
   const tasks = Array.isArray(safe.tasks)
-    ? safe.tasks.slice(0, 80).map((t, i) => normalizeTask(t, i))
+    ? safe.tasks.slice(0, 80).map((t, i) => normalizeTask(t, i, 0))
     : [];
+  ensureUniqueIds(tasks);
   return {
     title:                String(safe.title   || "").slice(0, 200),
     summary:              String(safe.summary || "").slice(0, 1000),
@@ -235,7 +336,7 @@ function normalizePlan(plan) {
 function normalizeBranch(payload) {
   const safe = payload && typeof payload === "object" ? payload : {};
   const arr = Array.isArray(safe.tasks) ? safe.tasks : [];
-  return arr.slice(0, 40).map((t, i) => normalizeTask(t, i));
+  return ensureUniqueIds(arr.slice(0, 40).map((t, i) => normalizeTask(t, i, 1)));
 }
 
 function countTasks(tasks) {
@@ -259,6 +360,13 @@ function branchMatchesEmoji(task, emoji) {
   if (!emoji) return true;
   if ((task.emoji || "📝") === emoji) return true;
   return (task.subtasks || []).some(s => branchMatchesEmoji(s, emoji));
+}
+
+function branchMatchesText(task, needle) {
+  if (!needle) return true;
+  const hay = (task.title + " " + (task.description || "")).toLowerCase();
+  if (hay.includes(needle)) return true;
+  return (task.subtasks || []).some(s => branchMatchesText(s, needle));
 }
 
 function isWholeDone(task) {
@@ -353,6 +461,39 @@ function renderModelSelect() {
   els.modelHint.textContent = T('settings.hint.models', { count: ol.models.length });
 }
 
+function renderOllamaDiagnostics() {
+  if (!els.ollamaDiagnostics) return;
+  const ol = window.CumploOllama;
+  const origin = window.location && window.location.origin ? window.location.origin : "http://127.0.0.1:8765";
+  const recommended = "http://127.0.0.1:8765,http://localhost:8765";
+  els.ollamaDiagnostics.innerHTML = "";
+
+  const rows = [
+    [T('diag.status'), ol.available === null ? T('diag.status.checking') : (ol.available ? T('diag.status.ok') : T('diag.status.fail'))],
+    [T('diag.models'), ol.models && ol.models.length ? String(ol.models.length) : "0"],
+    [T('diag.activeModel'), ol.activeModel || "—"],
+    [T('diag.origin'), origin],
+    [T('diag.recommendedOrigins'), recommended]
+  ];
+  if (ol.lastDetectError) rows.push([T('diag.lastError'), ol.lastDetectError]);
+
+  for (const [label, value] of rows) {
+    const row = document.createElement("div");
+    row.className = "diagnostic-row";
+    const k = document.createElement("strong");
+    k.textContent = label;
+    const v = document.createElement("span");
+    v.textContent = value;
+    row.append(k, v);
+    els.ollamaDiagnostics.appendChild(row);
+  }
+}
+
+function renderEphemeralToggle() {
+  if (!els.ephemeralToggle) return;
+  els.ephemeralToggle.checked = isEphemeralMode();
+}
+
 // -----------------------------------------------------------------------------
 // Render principal
 // -----------------------------------------------------------------------------
@@ -364,7 +505,7 @@ function render() {
     : T('tasks.empty');
 
   renderMeta();
-  renderFilterBar();
+  renderToolbar();
 
   if (!state.tasks.length) {
     els.tasksRoot.className = "tasks-root empty-state";
@@ -409,15 +550,21 @@ function renderMeta() {
   }
 }
 
-function renderFilterBar() {
-  const counts = collectEmojis(state.tasks);
-  if (counts.size === 0) {
-    els.filterBar.classList.add("hidden");
+function renderToolbar() {
+  // Toolbar = búsqueda + filtros emoji. Solo se muestra si hay tareas.
+  if (!state.tasks.length) {
+    els.taskToolbar.classList.add("hidden");
     els.filterBar.innerHTML = "";
     return;
   }
-  els.filterBar.classList.remove("hidden");
+  els.taskToolbar.classList.remove("hidden");
+  renderFilterBar();
+}
+
+function renderFilterBar() {
+  const counts = collectEmojis(state.tasks);
   els.filterBar.innerHTML = "";
+  if (counts.size === 0) return;
 
   const allChip = document.createElement("button");
   allChip.type = "button";
@@ -446,8 +593,10 @@ function renderFilterBar() {
 function renderTaskList(tasks) {
   const ul = document.createElement("ul");
   ul.className = "task-list";
+  const needle = uiState.textFilter.trim().toLowerCase();
   for (const task of tasks) {
     if (uiState.emojiFilter && !branchMatchesEmoji(task, uiState.emojiFilter)) continue;
+    if (needle && !branchMatchesText(task, needle)) continue;
     if (uiState.hideDone && task.done && (task.subtasks || []).every(s => isWholeDone(s))) continue;
     ul.appendChild(renderTaskItem(task));
   }
@@ -469,6 +618,7 @@ function renderTaskItem(task) {
   checkbox.className = "task-checkbox";
   checkbox.checked = task.done;
   checkbox.title = T('task.check.aria');
+  checkbox.setAttribute("aria-label", T('task.check.aria'));
   checkbox.addEventListener("change", () => {
     task.done = checkbox.checked;
     saveState();
@@ -480,6 +630,7 @@ function renderTaskItem(task) {
   toggle.className = "toggle-btn";
   toggle.textContent = task.collapsed ? "+" : "−";
   toggle.title = task.collapsed ? T('task.action.expand') : T('task.action.collapse');
+  toggle.setAttribute("aria-expanded", String(!task.collapsed));
   toggle.disabled = !(task.subtasks && task.subtasks.length);
   toggle.addEventListener("click", () => {
     task.collapsed = !task.collapsed;
@@ -498,18 +649,31 @@ function renderTaskItem(task) {
   emojiSpan.textContent = task.emoji || "📝";
 
   const title = document.createElement("input");
+  title.type = "text";
   title.className = "task-title";
+  title.setAttribute("aria-label", T('task.title.aria'));
   title.value = task.title;
+  title.maxLength = 240;
   title.addEventListener("input", () => {
     task.title = title.value.slice(0, 240);
+    saveStateDebounced();
+  });
+  title.addEventListener("blur", () => {
+    // Garantizar persistencia inmediata al perder foco.
     saveState();
   });
 
   titleRow.append(emojiSpan, title);
 
-  const desc = document.createElement("p");
-  desc.className = "task-description";
-  desc.textContent = task.description || T('task.noDescription');
+  // Descripción: en modo lectura o en modo edición inline
+  const descContainer = document.createElement("div");
+  descContainer.className = "task-description-container";
+
+  if (uiState.descEditingId === task.id) {
+    renderDescriptionEditor(descContainer, task);
+  } else {
+    renderDescriptionReader(descContainer, task);
+  }
 
   const details = document.createElement("div");
   details.className = "task-details";
@@ -523,7 +687,7 @@ function renderTaskItem(task) {
   energy.textContent = T('task.energy', { value: task.energy || T('task.energy.unknown') });
 
   details.append(time, energy);
-  content.append(titleRow, desc, details);
+  content.append(titleRow, descContainer, details);
 
   const actions = document.createElement("div");
   actions.className = "task-actions";
@@ -549,12 +713,8 @@ function renderTaskItem(task) {
   });
 
   const editBtn = smallButton(T('task.action.editDesc'), () => {
-    const value = prompt(T('confirm.editDesc'), task.description || "");
-    if (value !== null) {
-      task.description = value.slice(0, 1000);
-      saveState();
-      render();
-    }
+    uiState.descEditingId = task.id;
+    render();
   });
 
   const deleteBtn = smallButton(T('task.action.delete'), () => {
@@ -576,6 +736,59 @@ function renderTaskItem(task) {
 
   li.appendChild(card);
   return li;
+}
+
+function renderDescriptionReader(container, task) {
+  container.innerHTML = "";
+  const desc = document.createElement("p");
+  desc.className = "task-description";
+  desc.textContent = task.description || T('task.noDescription');
+  container.appendChild(desc);
+}
+
+function renderDescriptionEditor(container, task) {
+  container.innerHTML = "";
+  const ta = document.createElement("textarea");
+  ta.className = "task-description-editor";
+  ta.value = task.description || "";
+  ta.maxLength = 1000;
+  ta.rows = 3;
+  ta.setAttribute("aria-label", T('task.action.editDesc'));
+
+  // Focus + cursor al final cuando entra en edición
+  setTimeout(() => {
+    ta.focus();
+    ta.setSelectionRange(ta.value.length, ta.value.length);
+  }, 0);
+
+  const actions = document.createElement("div");
+  actions.className = "task-description-actions";
+
+  const saveBtn = smallButton(T('task.descEditor.save'), () => {
+    task.description = ta.value.slice(0, 1000);
+    uiState.descEditingId = null;
+    saveState();
+    render();
+  });
+
+  const cancelBtn = smallButton(T('task.descEditor.cancel'), () => {
+    uiState.descEditingId = null;
+    render();
+  });
+
+  // Atajo: Cmd/Ctrl + Enter para guardar; Esc para cancelar
+  ta.addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+      e.preventDefault();
+      saveBtn.click();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      cancelBtn.click();
+    }
+  });
+
+  actions.append(saveBtn, cancelBtn);
+  container.append(ta, actions);
 }
 
 function smallButton(label, onClick) {
@@ -615,6 +828,22 @@ function setAllCollapsed(tasks, collapsed) {
 // -----------------------------------------------------------------------------
 // Exportaciones
 // -----------------------------------------------------------------------------
+function buildExportPayload() {
+  return {
+    schema_version: EXPORT_SCHEMA_VERSION,
+    app_version: APP_VERSION,
+    exported_at: new Date().toISOString(),
+    plan: state
+  };
+}
+
+function extractPlanFromImport(payload) {
+  if (payload && typeof payload === "object" && payload.plan && typeof payload.plan === "object") {
+    return payload.plan;
+  }
+  return payload;
+}
+
 function planToMarkdown() {
   const lines = [];
   lines.push(`# ${state.title || T('meta.noTitle')}`);
@@ -664,7 +893,19 @@ function openBranchDialog(task) {
   els.branchDialog.showModal();
 }
 
+function setBranchBusy(busy) {
+  if (!els.branchRunBtn) return;
+  els.branchRunBtn.textContent = busy ? T('branch.cancelGeneration') : T('branch.run');
+  els.branchRunBtn.classList.toggle("is-cancel", busy);
+}
+
 async function runBranchExpansion() {
+  if (activeBranchController) {
+    activeBranchController.abort();
+    setStatus(T('status.canceling'));
+    return;
+  }
+
   const targetId = uiState.branchTargetId;
   const target = targetId ? findTaskById(state.tasks, targetId) : null;
   if (!target) { els.branchDialog.close(); return; }
@@ -672,7 +913,8 @@ async function runBranchExpansion() {
   const settings = loadSettings();
   const replace = els.branchReplaceToggle.checked;
   const lang = window.I18N.lang;
-  els.branchRunBtn.disabled = true;
+  activeBranchController = new AbortController();
+  setBranchBusy(true);
   setStatus(T('status.branch.start'));
 
   try {
@@ -685,7 +927,8 @@ async function runBranchExpansion() {
         profile:           els.profileSelect.value,
         lang
       }),
-      options: { temperature: Number(settings.temperature) }
+      options: { temperature: Number(settings.temperature) },
+      signal: activeBranchController.signal
     });
     const parsed = extractJson(raw);
     const newSubs = normalizeBranch(parsed);
@@ -694,6 +937,7 @@ async function runBranchExpansion() {
     if (replace) target.subtasks = newSubs;
     else target.subtasks = (target.subtasks || []).concat(newSubs);
     target.collapsed = false;
+    ensureUniqueIds(state.tasks);
 
     saveState();
     render();
@@ -701,30 +945,49 @@ async function runBranchExpansion() {
     setStatus(T('status.branch.added', { n: newSubs.length, title: target.title }), "ok");
   } catch (error) {
     console.error(error);
-    setStatus(T('status.error.prefix', { message: error.message }), "error");
+    if (activeBranchController && activeBranchController.signal.aborted) {
+      setStatus(T('status.cancelled'), "warn");
+    } else {
+      setStatus(T('status.error.prefix', { message: error.message }), "error");
+    }
   } finally {
-    els.branchRunBtn.disabled = false;
+    activeBranchController = null;
+    setBranchBusy(false);
   }
 }
 
 // -----------------------------------------------------------------------------
 // Handler: generar desglose
 // -----------------------------------------------------------------------------
-els.generateBtn.addEventListener("click", async () => {
+function setGenerateBusy(busy) {
+  if (!els.generateBtn) return;
+  els.generateBtn.textContent = busy ? T('composer.cancel') : T('composer.generate');
+  els.generateBtn.classList.toggle("is-cancel", busy);
+}
+
+async function runGenerate() {
+  if (activeGenerateController) {
+    activeGenerateController.abort();
+    setStatus(T('status.canceling'));
+    return;
+  }
+
   const task = els.taskInput.value.trim();
   if (!task) { setStatus(T('status.error.empty'), "error"); return; }
   if (task.length > 2000) { setStatus(T('status.error.tooLong'), "error"); return; }
 
   const settings = loadSettings();
   const lang = window.I18N.lang;
+  activeGenerateController = new AbortController();
+  setGenerateBusy(true);
   setStatus(T('status.generating'));
-  els.generateBtn.disabled = true;
 
   try {
     const raw = await window.CumploOllama.chat({
       system: buildSystemPrompt(lang),
       user:   buildUserPrompt({ task, spice: uiState.spice, profile: els.profileSelect.value, lang }),
-      options: { temperature: Number(settings.temperature) }
+      options: { temperature: Number(settings.temperature) },
+      signal: activeGenerateController.signal
     });
     const parsed = extractJson(raw);
     state = normalizePlan(parsed);
@@ -733,9 +996,24 @@ els.generateBtn.addEventListener("click", async () => {
     setStatus(T('status.generated'), "ok");
   } catch (error) {
     console.error(error);
-    setStatus(T('status.error.prefix', { message: error.message }), "error");
+    if (activeGenerateController && activeGenerateController.signal.aborted) {
+      setStatus(T('status.cancelled'), "warn");
+    } else {
+      setStatus(T('status.error.prefix', { message: error.message }), "error");
+    }
   } finally {
-    els.generateBtn.disabled = false;
+    activeGenerateController = null;
+    setGenerateBusy(false);
+  }
+}
+
+els.generateBtn.addEventListener("click", runGenerate);
+
+// Atajo: Ctrl/Cmd + Enter en el textarea para desglosar
+els.taskInput.addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+    e.preventDefault();
+    runGenerate();
   }
 });
 
@@ -777,7 +1055,10 @@ els.newPlanBtn.addEventListener("click", () => {
   state = emptyState();
   uiState.emojiFilter = null;
   uiState.hideDone = false;
+  uiState.textFilter = "";
+  uiState.descEditingId = null;
   els.hideDoneToggle.checked = false;
+  if (els.searchInput) els.searchInput.value = "";
   els.taskInput.value = "";
   saveState();
   render();
@@ -809,7 +1090,7 @@ els.dlgExportJsonBtn.addEventListener("click", () => {
     return;
   }
   const file = "cumplo-plan.json";
-  downloadText(file, JSON.stringify(state, null, 2), "application/json;charset=utf-8");
+  downloadText(file, JSON.stringify(buildExportPayload(), null, 2), "application/json;charset=utf-8");
   els.exportDialog.close();
   setStatus(T('status.exportedJson', { file }), "ok");
 });
@@ -818,8 +1099,12 @@ els.dlgImportInput.addEventListener("change", async event => {
   const file = event.target.files[0];
   if (!file) return;
   try {
+    if (file.size > IMPORT_MAX_BYTES) {
+      throw new Error(T('err.import.tooLarge', { mb: Math.round(IMPORT_MAX_BYTES / 1024 / 1024) }));
+    }
     const text = await file.text();
-    state = normalizePlan(JSON.parse(text));
+    const parsed = JSON.parse(text);
+    state = normalizePlan(extractPlanFromImport(parsed));
     saveState();
     render();
     els.exportDialog.close();
@@ -836,15 +1121,21 @@ els.dlgImportInput.addEventListener("change", async event => {
 // -----------------------------------------------------------------------------
 els.clearDataBtn.addEventListener("click", () => {
   if (!confirm(T('confirm.clearAll'))) return;
-  localStorage.removeItem(STORAGE_KEY);
-  localStorage.removeItem(SETTINGS_KEY);
+  try {
+    removePersistentState();
+    localStorage.removeItem(SETTINGS_KEY);
+    for (const k of LEGACY_SETTINGS_KEYS) localStorage.removeItem(k);
+  } catch (e) {
+    console.warn("Cumplø: localStorage no accesible al limpiar", e);
+  }
   try { window.CumploOllama.writeActiveModel(null); } catch {}
-  for (const k of LEGACY_STATE_KEYS)    localStorage.removeItem(k);
-  for (const k of LEGACY_SETTINGS_KEYS) localStorage.removeItem(k);
   state = emptyState();
   uiState.emojiFilter = null;
   uiState.hideDone = false;
+  uiState.textFilter = "";
+  uiState.descEditingId = null;
   if (els.hideDoneToggle) els.hideDoneToggle.checked = false;
+  if (els.searchInput) els.searchInput.value = "";
   render();
   setStatus(T('status.cleared'), "ok");
 });
@@ -869,6 +1160,16 @@ els.hideDoneToggle.addEventListener("change", () => {
   render();
 });
 
+// Filtro de texto (debounced)
+const onSearchInput = debounce(() => {
+  uiState.textFilter = els.searchInput.value;
+  render();
+}, 150);
+
+if (els.searchInput) {
+  els.searchInput.addEventListener("input", onSearchInput);
+}
+
 els.openSettingsBtn.addEventListener("click", () => {
   const s = loadSettings();
   els.temperatureInput.value = s.temperature;
@@ -877,7 +1178,9 @@ els.openSettingsBtn.addEventListener("click", () => {
 });
 
 els.saveSettingsBtn.addEventListener("click", () => {
+  const currentSettings = loadSettings();
   saveSettings({
+    ...currentSettings,
     temperature: Number(els.temperatureInput.value || DEFAULT_SETTINGS.temperature)
   });
   const chosen = els.modelSelect.value;
@@ -891,28 +1194,69 @@ els.redetectBtn.addEventListener("click", async () => {
   els.modelHint.textContent = T('status.detect.retrying');
   await window.CumploOllama.detect();
   renderModelSelect();
+  renderOllamaDiagnostics();
   els.redetectBtn.disabled = false;
 });
 
 els.branchRunBtn.addEventListener("click", runBranchExpansion);
-els.branchCancelBtn.addEventListener("click", () => els.branchDialog.close());
+els.branchCancelBtn.addEventListener("click", () => {
+  if (activeBranchController) activeBranchController.abort();
+  els.branchDialog.close();
+});
+if (els.ephemeralToggle) {
+  els.ephemeralToggle.addEventListener("change", () => {
+    const settings = loadSettings();
+    settings.ephemeral = els.ephemeralToggle.checked;
+    saveSettings(settings);
+    if (settings.ephemeral) {
+      removePersistentState();
+      setStatus(T('status.ephemeral.enabled'), "ok");
+    } else {
+      saveState();
+      setStatus(T('status.ephemeral.disabled'), "ok");
+    }
+    renderEphemeralToggle();
+  });
+}
+if (els.retryOllamaBtn) {
+  els.retryOllamaBtn.addEventListener("click", async () => {
+    els.retryOllamaBtn.disabled = true;
+    setStatus(T('status.detect.retrying'));
+    await window.CumploOllama.detect();
+    els.retryOllamaBtn.disabled = false;
+    renderOllamaDiagnostics();
+  });
+}
 
 // -----------------------------------------------------------------------------
-// Botón Apagar
+// Botón Apagar (sin innerHTML + estilos inline; respeta la CSP estricta)
 // -----------------------------------------------------------------------------
 els.shutdownBtn.addEventListener("click", async () => {
   if (!confirm(T('confirm.shutdown'))) return;
   try {
     await fetch("/__cumplo_shutdown", { method: "POST" });
-    document.body.innerHTML = `
-      <div style="padding:40px; text-align:center; font-family:system-ui, sans-serif;">
-        <h1>${T('shutdown.title')}</h1>
-        <p>${T('shutdown.message')}</p>
-      </div>`;
+    renderShutdownScreen();
   } catch (e) {
     setStatus(T('status.shutdown.failed', { message: e.message }), "error");
   }
 });
+
+function renderShutdownScreen() {
+  // Reemplazamos el cuerpo construyendo nodos DOM con clases CSS, no con
+  // estilos inline: la CSP estricta (style-src 'self') bloquearía los inline.
+  document.body.innerHTML = "";
+  const wrap = document.createElement("div");
+  wrap.className = "shutdown-screen";
+
+  const h1 = document.createElement("h1");
+  h1.textContent = T('shutdown.title');
+
+  const p = document.createElement("p");
+  p.textContent = T('shutdown.message');
+
+  wrap.append(h1, p);
+  document.body.appendChild(wrap);
+}
 
 // -----------------------------------------------------------------------------
 // Conmutador de idioma
@@ -938,6 +1282,10 @@ document.addEventListener("cumplo:lang-changed", () => {
   setBranchSpice(uiState.branchSpice);
   renderOllamaStatus();
   renderModelSelect();
+  renderOllamaDiagnostics();
+  renderEphemeralToggle();
+  setGenerateBusy(Boolean(activeGenerateController));
+  setBranchBusy(Boolean(activeBranchController));
   render();
 });
 
@@ -946,8 +1294,26 @@ document.addEventListener("cumplo:lang-changed", () => {
 // -----------------------------------------------------------------------------
 document.addEventListener("cumplo:ollama-changed", () => {
   renderOllamaStatus();
+  renderOllamaDiagnostics();
   if (els.settingsDialog && els.settingsDialog.open) renderModelSelect();
 });
+
+// -----------------------------------------------------------------------------
+// Versión en el footer (leída del propio servidor local)
+// -----------------------------------------------------------------------------
+async function loadFooterVersion() {
+  if (!els.footerVersion) return;
+  try {
+    const res = await fetch("/__cumplo_health", { method: "GET" });
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data && data.version) {
+      els.footerVersion.textContent = "v" + data.version;
+    }
+  } catch {
+    // sin conexión al servidor (modo offline puro: file://) → footer queda con "—"
+  }
+}
 
 // -----------------------------------------------------------------------------
 // Boot
@@ -958,5 +1324,8 @@ loadState();
 setSpice(DEFAULT_SPICE);
 setBranchSpice(DEFAULT_SPICE);
 render();
+renderEphemeralToggle();
 renderOllamaStatus();
+renderOllamaDiagnostics();
 window.CumploOllama.init();
+loadFooterVersion();
