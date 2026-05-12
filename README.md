@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="frontend/static/img/pluma-logo-full.png" alt="PlumA — AI Assistant for Archival Description" width="600">
+</p>
+
 # Cumplø
 
 Cumplø es una herramienta local, sin nube, para descomponer **proyectos** en **tareas** y **subtareas** accionables usando un modelo de lenguaje ejecutado en este mismo equipo a través de [Ollama](https://ollama.com). Forma parte de una suite local-first orientada a trabajo profesional, planificación y productividad con IA local.
