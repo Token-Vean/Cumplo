@@ -3,7 +3,7 @@
 Cumplø · servidor local
 
 Servidor HTTP estático limitado a localhost con dos endpoints internos
-(/__cumplo_health, /__cumplo_shutdown). No expone Cumplø en la red y no
+(`/__cumplo_health`, `/__cumplo_shutdown`). No expone Cumplø en la red y no
 requiere dependencias externas.
 
 Patrón derivado de Compo v0.1.13, endurecido hasta 0.8.0-beta:
@@ -11,7 +11,7 @@ Patrón derivado de Compo v0.1.13, endurecido hasta 0.8.0-beta:
 - Validación de Host en todas las respuestas (mitiga DNS rebinding).
 - Cabeceras de seguridad endurecidas: CSP, Permissions-Policy,
   Cross-Origin-Opener-Policy, Cross-Origin-Resource-Policy.
-- El header Server: no revela versión específica.
+- El header Server no revela versión específica.
 - Mensaje claro si el puerto está ocupado, sin stack trace.
 - Comprobación de versión mínima de Python.
 """
@@ -72,7 +72,7 @@ PERMISSIONS_POLICY = (
 )
 
 
-def _is_allowed_origin(value, allowed):
+def _is_allowed_origin(value: str | None, allowed: tuple[str, ...]) -> bool:
     if not value:
         return False
     return value in allowed
@@ -81,15 +81,15 @@ def _is_allowed_origin(value, allowed):
 class CumploServer(ThreadingHTTPServer):
     allow_reuse_address = True
     daemon_threads = True
-    allowed_origins = ()
-    allowed_hosts = ()
+    allowed_origins: tuple[str, ...] = ()
+    allowed_hosts: tuple[str, ...] = ()
 
 
 class CumploHandler(SimpleHTTPRequestHandler):
     server_version = "CumploLocalHTTP"
     sys_version = ""
 
-    def end_headers(self):
+    def end_headers(self) -> None:
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("Permissions-Policy", PERMISSIONS_POLICY)
@@ -98,29 +98,32 @@ class CumploHandler(SimpleHTTPRequestHandler):
         self.send_header("Content-Security-Policy", CSP)
         super().end_headers()
 
-    def _host_ok(self):
-        """Valida que el header Host venga de una de las direcciones esperadas
-        (mitigación de DNS rebinding). Una página maliciosa rebound a 127.0.0.1
-        seguiría enviando su propio dominio en Host."""
+    def _host_ok(self) -> bool:
+        """
+        Valida que el header Host venga de una de las direcciones esperadas
+        (mitigación de DNS rebinding). Una página maliciosa rebound a
+        127.0.0.1 seguiría enviando su propio dominio en Host.
+        """
         host = (self.headers.get("Host") or "").strip().lower()
         if not host:
             return False
         return host in self.server.allowed_hosts
 
-    def _origin_ok(self):
-        """Acepta endpoints internos solo si Origin o Sec-Fetch-Site demuestran
-        que la petición sale del propio Cumplø (mitigación CSRF)."""
+    def _origin_ok(self) -> bool:
+        """
+        Acepta endpoints internos solo si Origin o Sec-Fetch-Site demuestran
+        que la petición sale del propio Cumplø (mitigación CSRF).
+        """
         allowed = self.server.allowed_origins
         origin = self.headers.get("Origin")
-        sfs = self.headers.get("Sec-Fetch-Site")
-
+        sec_fetch_site = self.headers.get("Sec-Fetch-Site")
         if origin is not None:
             return _is_allowed_origin(origin, allowed)
-        if sfs == "same-origin":
+        if sec_fetch_site == "same-origin":
             return True
         return False
 
-    def _send_json(self, payload, status=200):
+    def _send_json(self, payload: dict, status: int = 200) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -129,7 +132,7 @@ class CumploHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def do_GET(self):  # noqa: N802
+    def do_GET(self) -> None:  # noqa: N802
         # Defensa DNS rebinding: si el Host no es uno de los esperados, no
         # servimos nada. 421 (Misdirected Request) es semánticamente correcto.
         if not self._host_ok():
@@ -137,18 +140,21 @@ class CumploHandler(SimpleHTTPRequestHandler):
             return
 
         path = self.path.split("?", 1)[0]
+
         if path == "/__cumplo_health":
             if not self._origin_ok():
                 self.send_error(403, "Forbidden")
                 return
             self._send_json({"ok": True, "app": "Cumplo", "version": __version__})
             return
+
         # Si la raíz es /, servir index.html.
         if path == "/":
             self.path = "/index.html"
+
         super().do_GET()
 
-    def do_POST(self):  # noqa: N802
+    def do_POST(self) -> None:  # noqa: N802
         # Defensa DNS rebinding también en POST.
         if not self._host_ok():
             self.send_error(421, "Misdirected Request")
@@ -167,55 +173,57 @@ class CumploHandler(SimpleHTTPRequestHandler):
         if length:
             self.rfile.read(min(length, 4096))
 
-        self._send_json({
-            "ok": True,
-            "message": "Cumplo local server is shutting down. You can close this browser tab."
-        })
+        self._send_json(
+            {
+                "ok": True,
+                "message": "Cumplo local server is shutting down. You can close this browser tab.",
+            }
+        )
 
-        def stop():
+        def stop() -> None:
             print(
-                "\n  Cumplo: apagado solicitado desde la interfaz. Cerrando servidor local...\n",
+                "\n Cumplo: apagado solicitado desde la interfaz. Cerrando servidor local...\n",
                 flush=True,
             )
             self.server.shutdown()
 
         threading.Timer(0.35, stop).start()
 
-    def log_message(self, fmt, *args):
+    def log_message(self, fmt: str, *args) -> None:
         try:
             line = fmt % args
         except Exception:
             line = fmt
-        print("  [Cumplo] " + line, flush=True)
+        print(" [Cumplo] " + line, flush=True)
 
 
-def _bind_server(host, port, handler):
+def _bind_server(host: str, port: int, handler: type[SimpleHTTPRequestHandler]) -> CumploServer:
     try:
         return CumploServer((host, port), handler)
     except OSError as exc:
         if exc.errno in (98, 48, 10048):  # EADDRINUSE Linux / macOS / Windows
             sys.stderr.write(
-                f"\n  X El puerto {port} ya esta en uso.\n"
-                f"    Otra instancia de Cumplo (o de algun otro programa) esta\n"
-                f"    escuchando en ese puerto. Cierra esa instancia o arranca\n"
-                f"    Cumplo en otro puerto:\n\n"
-                f"      python server.py --port 8766\n\n"
+                f"\n X El puerto {port} ya está en uso.\n"
+                " Otra instancia de Cumplø (o de algún otro programa) está\n"
+                " escuchando en ese puerto. Cierra esa instancia o arranca\n"
+                " Cumplø en otro puerto:\n\n"
+                " python server.py --port 8766\n\n"
             )
             sys.exit(2)
         raise
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Servidor local de Cumplo")
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Servidor local de Cumplø")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
 
     if args.host not in ("127.0.0.1", "localhost"):
         sys.stderr.write(
-            f"\n  !  Atencion: vinculando a {args.host} en lugar de 127.0.0.1.\n"
-            f"     Cumplo esta pensada para uso local. Vincular a otra interfaz\n"
-            f"     expone la aplicacion a tu red local; no se recomienda.\n\n"
+            f"\n ! Atención: vinculando a {args.host} en lugar de 127.0.0.1.\n"
+            " Cumplø está pensada para uso local. Vincular a otra interfaz\n"
+            " expone la aplicación a tu red local; no se recomienda.\n\n"
         )
 
     root = Path(__file__).resolve().parent
@@ -223,32 +231,33 @@ def main():
 
     server = _bind_server(args.host, args.port, CumploHandler)
     server.allowed_origins = tuple(
-        tpl.format(port=args.port) for tpl in ALLOWED_ORIGINS_TEMPLATE
+        template.format(port=args.port) for template in ALLOWED_ORIGINS_TEMPLATE
     )
     server.allowed_hosts = tuple(
-        tpl.format(port=args.port) for tpl in ALLOWED_HOSTS_TEMPLATE
+        template.format(port=args.port) for template in ALLOWED_HOSTS_TEMPLATE
     )
 
     url = f"http://{args.host}:{args.port}/index.html"
     print("", flush=True)
-    print("  Cumplo - servidor local", flush=True)
-    print("  -----------------------", flush=True)
-    print(f"  URL:     {url}", flush=True)
-    print(f"  Puerto:  {args.port}", flush=True)
-    print(f"  Version: {__version__}", flush=True)
+    print(" Cumplø - servidor local", flush=True)
+    print(" -----------------------", flush=True)
+    print(f" URL: {url}", flush=True)
+    print(f" Puerto: {args.port}", flush=True)
+    print(f" Versión: {__version__}", flush=True)
     print("", flush=True)
-    print("  Puedes apagar Cumplo desde la interfaz o con Ctrl+C.", flush=True)
+    print(" Puedes apagar Cumplø desde la interfaz o con Ctrl+C.", flush=True)
     print("", flush=True)
 
     try:
         server.serve_forever(poll_interval=0.2)
     except KeyboardInterrupt:
-        print("\n  Cumplo: apagado manual con Ctrl+C.\n", flush=True)
+        print("\n Cumplø: apagado manual con Ctrl+C.\n", flush=True)
     finally:
         try:
             server.server_close()
         except Exception:
             pass
+
     return 0
 
 

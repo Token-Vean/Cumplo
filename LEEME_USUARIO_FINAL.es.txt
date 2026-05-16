@@ -1,0 +1,66 @@
+CUMPLO - INSTALACIÓN SENCILLA PARA WINDOWS Y MACOS
+==================================================
+
+Cumplø funciona en local. Tus proyectos no se envían a servicios externos.
+Para usar la inteligencia artificial local, Cumplø necesita Ollama.
+
+WINDOWS
+-------
+
+1. Instala Ollama desde:
+   https://ollama.com/download
+
+2. Abre Ollama desde el menú Inicio.
+
+3. Haz doble clic en:
+   Configurar_Cumplo_Windows.bat
+
+   Este paso solo hay que hacerlo una vez.
+   Configura la conexión local con Ollama y descarga el modelo recomendado.
+
+4. Para abrir Cumplø en usos posteriores, haz doble clic en:
+   Abrir_Cumplo_Windows.bat
+
+
+MACOS
+-----
+
+1. Instala Ollama desde:
+   https://ollama.com/download
+
+2. Abre Ollama desde Aplicaciones.
+
+3. Haz doble clic en:
+   Configurar_Cumplo_macOS.command
+
+   Este paso solo hay que hacerlo una vez.
+   Configura la conexión local con Ollama y descarga el modelo recomendado.
+
+4. Para abrir Cumplø en usos posteriores, haz doble clic en:
+   Abrir_Cumplo_macOS.command
+
+
+SI AL HACER DOBLE CLIC EN MACOS APARECE UN AVISO DE SEGURIDAD
+-------------------------------------------------------------
+
+macOS puede bloquear archivos descargados de internet. En ese caso:
+
+1. Haz clic derecho sobre el archivo .command.
+2. Pulsa Abrir.
+3. Confirma de nuevo Abrir.
+
+Si macOS indica que el archivo no tiene permisos de ejecución, abre Terminal en
+la carpeta de Cumplø y ejecuta:
+
+chmod +x *.command start.sh
+
+Después vuelve a hacer doble clic en el archivo correspondiente.
+
+
+NOTAS
+-----
+
+- Ollama debe estar abierto para que funcione la generación automática.
+- El primer modelo puede tardar varios minutos en descargarse.
+- Si Cumplø se abre pero indica que Ollama no está detectado, vuelve a ejecutar
+  el archivo de configuración inicial y reinicia Ollama.
