@@ -5,7 +5,15 @@
    servidor restringe connect-src a ese origen para que esta promesa sea
    verificable por el usuario.
 
-   Patrón de cliente local con CSP estricta y conexión limitada a Ollama.
+   Cambios 0.8.1:
+   - Generación en streaming (NDJSON) con callback de progreso y timeout de
+     inactividad en lugar de timeout global: el usuario ve avanzar la
+     generación y las respuestas largas no mueren arbitrariamente.
+   - Soporte de salida estructurada: el campo "format" acepta un JSON Schema
+     que Ollama convierte en gramática de sampling. Si la versión local de
+     Ollama lo rechaza (HTTP 400), se reintenta automáticamente sin "format".
+   - Límite duro de tamaño de respuesta (protege JSON.parse de respuestas
+     desbocadas de un modelo en bucle).
    =========================================================================== */
 
 (function () {
@@ -13,7 +21,8 @@
 
   const ENDPOINT = 'http://localhost:11434';
   const DETECT_TIMEOUT_MS   = 2500;
-  const GENERATE_TIMEOUT_MS = 180000;
+  const IDLE_TIMEOUT_MS     = 120000;   // sin datos nuevos durante 2 min → abortar
+  const MAX_RESPONSE_CHARS  = 2000000;  // 2M caracteres: tope de seguridad
 
   // Allowlist de modelos recomendados para el flujo de Cumplø. Lista curada:
   // modelos pequeños/medianos que rinden bien con el system prompt de
@@ -166,9 +175,17 @@
     /**
      * Generación a partir de un mensaje system + user. Devuelve la string
      * con el contenido del assistant. La validación/normalización del JSON
-     * la hace app.js (parser tolerante).
+     * la hace app.js (parser tolerante como defensa en profundidad).
+     *
+     * Parámetros:
+     *   system, user  — prompts obligatorios.
+     *   model         — opcional; por defecto el modelo activo.
+     *   options       — opciones de sampling de Ollama (temperature, etc.).
+     *   signal        — AbortSignal externo (botón Cancelar).
+     *   format        — JSON Schema opcional para salida estructurada.
+     *   onProgress    — callback ({ chars }) durante el streaming.
      */
-    async chat({ system, user, model, options, signal } = {}) {
+    async chat({ system, user, model, options, signal, format, onProgress } = {}) {
       if (!system) throw new Error('Missing system prompt');
       if (!user)   throw new Error('Missing user prompt');
 
@@ -180,31 +197,46 @@
         throw new Error(tt('err.modelName', 'Invalid model name.'));
       }
 
-      const ctrl  = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), GENERATE_TIMEOUT_MS);
+      try {
+        return await this._chatStreaming({ system, user, useModel, options, signal, format, onProgress });
+      } catch (err) {
+        // Si la versión local de Ollama no acepta "format" como JSON Schema
+        // (HTTP 400), reintentamos una única vez sin salida estructurada.
+        if (format && err && err.httpStatus === 400) {
+          return await this._chatStreaming({ system, user, useModel, options, signal, format: null, onProgress });
+        }
+        throw err;
+      }
+    },
+
+    async _chatStreaming({ system, user, useModel, options, signal, format, onProgress }) {
+      const ctrl = new AbortController();
+      let idleTimer = setTimeout(() => ctrl.abort(), IDLE_TIMEOUT_MS);
+      const resetIdle = () => {
+        clearTimeout(idleTimer);
+        idleTimer = setTimeout(() => ctrl.abort(), IDLE_TIMEOUT_MS);
+      };
       if (signal) {
         if (signal.aborted) ctrl.abort();
         else signal.addEventListener('abort', () => ctrl.abort(), { once: true });
       }
 
-      try {
-        const body = {
-          model: useModel,
-          stream: false,
-          messages: [
-            { role: 'system', content: system },
-            { role: 'user',   content: user   }
-          ],
-          options: Object.assign({
-            temperature: 0.25,
-            top_p: 0.9,
-            num_ctx: 8192
-          }, options || {})
-        };
-        // No enviamos format: "json" deliberadamente: rompe con modelos
-        // pequeños y el parser tolerante de app.js limpia el JSON aunque
-        // venga con code fences o ruido alrededor.
+      const body = {
+        model: useModel,
+        stream: true,
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user',   content: user   }
+        ],
+        options: Object.assign({
+          temperature: 0.25,
+          top_p: 0.9,
+          num_ctx: 8192
+        }, options || {})
+      };
+      if (format) body.format = format;
 
+      try {
         let res;
         try {
           res = await fetch(`${ENDPOINT}/api/chat`, {
@@ -219,23 +251,82 @@
           }
           throw new Error(friendlyFetchError(err, 'generate'));
         }
+
         if (!res.ok) {
           let details = '';
           try {
             const err = await res.json();
             details = err && err.error ? err.error : '';
           } catch { /* respuesta no JSON */ }
-          throw new Error(friendlyHttpError(res.status, details, 'generate'));
+          const e = new Error(friendlyHttpError(res.status, details, 'generate'));
+          e.httpStatus = res.status;
+          throw e;
         }
-        let data;
-        try { data = await res.json(); }
-        catch { throw new Error(tt('err.unparseable', 'Ollama returned an unreadable response.')); }
-        if (!data || !data.message || typeof data.message.content !== 'string') {
+
+        // Fallback sin streaming (entornos sin ReadableStream).
+        if (!res.body || typeof res.body.getReader !== 'function') {
+          let data;
+          try { data = await res.json(); }
+          catch { throw new Error(tt('err.unparseable', 'Ollama returned an unreadable response.')); }
+          if (!data || !data.message || typeof data.message.content !== 'string') {
+            throw new Error(tt('err.noContent', 'Ollama returned no content.'));
+          }
+          return data.message.content;
+        }
+
+        // Lectura del stream NDJSON: un objeto JSON por línea.
+        const reader  = res.body.getReader();
+        const decoder = new TextDecoder('utf-8');
+        let buffer  = '';
+        let content = '';
+
+        const consumeLine = (line) => {
+          const trimmed = line.trim();
+          if (!trimmed) return;
+          let chunk;
+          try { chunk = JSON.parse(trimmed); }
+          catch { return; /* línea parcial o ruido: se ignora */ }
+          if (chunk && chunk.error) {
+            throw new Error(friendlyHttpError(500, String(chunk.error), 'generate'));
+          }
+          if (chunk && chunk.message && typeof chunk.message.content === 'string') {
+            content += chunk.message.content;
+            if (content.length > MAX_RESPONSE_CHARS) {
+              ctrl.abort();
+              throw new Error(tt('err.responseTooLarge', 'The model response exceeds the maximum allowed size.'));
+            }
+            if (typeof onProgress === 'function') {
+              try { onProgress({ chars: content.length }); } catch { /* UI opcional */ }
+            }
+          }
+        };
+
+        while (true) {
+          let step;
+          try { step = await reader.read(); }
+          catch (err) {
+            if (ctrl.signal.aborted) throw new Error(friendlyFetchError({ name: 'AbortError' }, 'generate'));
+            throw new Error(friendlyFetchError(err, 'generate'));
+          }
+          if (step.done) break;
+          resetIdle();
+          buffer += decoder.decode(step.value, { stream: true });
+          let nl;
+          while ((nl = buffer.indexOf('\n')) >= 0) {
+            const line = buffer.slice(0, nl);
+            buffer = buffer.slice(nl + 1);
+            consumeLine(line);
+          }
+        }
+        buffer += decoder.decode();
+        if (buffer.trim()) consumeLine(buffer);
+
+        if (!content) {
           throw new Error(tt('err.noContent', 'Ollama returned no content.'));
         }
-        return data.message.content;
+        return content;
       } finally {
-        clearTimeout(timer);
+        clearTimeout(idleTimer);
       }
     },
 

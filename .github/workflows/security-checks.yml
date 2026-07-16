@@ -41,6 +41,10 @@ jobs:
           node --check ollama.js
           node --check prompts.js
 
+      - name: Run test suite
+        run: |
+          node --test "tests/*.test.mjs"
+
       - name: Compile Python files
         run: |
           python -m py_compile server.py

@@ -6,11 +6,19 @@ Servidor HTTP estático limitado a localhost con dos endpoints internos
 (`/__cumplo_health`, `/__cumplo_shutdown`). No expone Cumplø en la red y no
 requiere dependencias externas.
 
-Patrón derivado de Compo v0.1.13, endurecido hasta 0.8.0-beta:
+Patrón derivado de Compo v0.1.13, endurecido hasta 0.8.1-beta:
 - Verificación de Origin / Sec-Fetch-Site en los endpoints internos.
-- Validación de Host en todas las respuestas (mitiga DNS rebinding).
+- Validación de Host en todas las respuestas (mitiga DNS rebinding),
+  incluida ahora también en peticiones HEAD.
 - Cabeceras de seguridad endurecidas: CSP, Permissions-Policy,
   Cross-Origin-Opener-Policy, Cross-Origin-Resource-Policy.
+- Bloqueo de rutas ocultas: nunca se sirven ficheros ni directorios cuyo
+  nombre empiece por punto (.git, .env, .gitignore, etc.).
+- `Cache-Control: no-cache` en los estáticos para que las actualizaciones
+  de la aplicación no queden atrapadas en la caché del navegador.
+- Sin `os.chdir()`: el directorio raíz se pasa al handler, de modo que el
+  proceso no retiene la carpeta de instalación (bloqueo de carpetas en
+  Windows).
 - El header Server no revela versión específica.
 - Mensaje claro si el puerto está ocupado, sin stack trace.
 - Comprobación de versión mínima de Python.
@@ -20,13 +28,13 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 import threading
+from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-__version__ = "0.8.0-beta"
+__version__ = "0.8.1-beta"
 
 # Versión mínima de Python.
 if sys.version_info < (3, 8):
@@ -78,6 +86,17 @@ def _is_allowed_origin(value: str | None, allowed: tuple[str, ...]) -> bool:
     return value in allowed
 
 
+def _has_hidden_segment(path: str) -> bool:
+    """
+    True si alguna parte de la ruta empieza por punto: /.git/config,
+    /docs/.secreto, /.env… Estas rutas nunca se sirven, aunque existan en
+    el directorio raíz (defensa en profundidad frente a residuos de
+    desarrollo empaquetados por error).
+    """
+    clean = path.split("?", 1)[0].split("#", 1)[0]
+    return any(segment.startswith(".") for segment in clean.split("/") if segment)
+
+
 class CumploServer(ThreadingHTTPServer):
     allow_reuse_address = True
     daemon_threads = True
@@ -96,6 +115,12 @@ class CumploHandler(SimpleHTTPRequestHandler):
         self.send_header("Cross-Origin-Opener-Policy", "same-origin")
         self.send_header("Cross-Origin-Resource-Policy", "same-origin")
         self.send_header("Content-Security-Policy", CSP)
+        # Los endpoints JSON envían su propio Cache-Control: no-store y marcan
+        # _cache_header_sent. Para el resto (estáticos), no-cache obliga a
+        # revalidar y evita servir app.js/index.html obsoletos tras actualizar.
+        if not getattr(self, "_cache_header_sent", False):
+            self.send_header("Cache-Control", "no-cache")
+        self._cache_header_sent = False
         super().end_headers()
 
     def _host_ok(self) -> bool:
@@ -128,15 +153,23 @@ class CumploHandler(SimpleHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
+        self._cache_header_sent = True
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
-    def do_GET(self) -> None:  # noqa: N802
-        # Defensa DNS rebinding: si el Host no es uno de los esperados, no
-        # servimos nada. 421 (Misdirected Request) es semánticamente correcto.
+    def _static_guard(self) -> bool:
+        """Comprobaciones comunes a GET y HEAD. Devuelve False si ya respondió."""
         if not self._host_ok():
             self.send_error(421, "Misdirected Request")
+            return False
+        if _has_hidden_segment(self.path):
+            self.send_error(404, "Not found")
+            return False
+        return True
+
+    def do_GET(self) -> None:  # noqa: N802
+        if not self._static_guard():
             return
 
         path = self.path.split("?", 1)[0]
@@ -153,6 +186,14 @@ class CumploHandler(SimpleHTTPRequestHandler):
             self.path = "/index.html"
 
         super().do_GET()
+
+    def do_HEAD(self) -> None:  # noqa: N802
+        # HEAD comparte las mismas defensas que GET (antes las eludía).
+        if not self._static_guard():
+            return
+        if self.path.split("?", 1)[0] == "/":
+            self.path = "/index.html"
+        super().do_HEAD()
 
     def do_POST(self) -> None:  # noqa: N802
         # Defensa DNS rebinding también en POST.
@@ -197,7 +238,7 @@ class CumploHandler(SimpleHTTPRequestHandler):
         print(" [Cumplo] " + line, flush=True)
 
 
-def _bind_server(host: str, port: int, handler: type[SimpleHTTPRequestHandler]) -> CumploServer:
+def _bind_server(host: str, port: int, handler) -> CumploServer:
     try:
         return CumploServer((host, port), handler)
     except OSError as exc:
@@ -227,9 +268,13 @@ def main() -> int:
         )
 
     root = Path(__file__).resolve().parent
-    os.chdir(root)
 
-    server = _bind_server(args.host, args.port, CumploHandler)
+    # Sin os.chdir(): el directorio raíz se inyecta en el handler. El proceso
+    # no retiene la carpeta de instalación (evita el bloqueo de carpeta en
+    # Windows corregido originalmente en la rama 0.8.6).
+    handler = partial(CumploHandler, directory=str(root))
+
+    server = _bind_server(args.host, args.port, handler)
     server.allowed_origins = tuple(
         template.format(port=args.port) for template in ALLOWED_ORIGINS_TEMPLATE
     )

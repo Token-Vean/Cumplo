@@ -12,7 +12,7 @@ const PROJECTS_STORAGE_KEY = "cumplo_projects_v2";
 const SETTINGS_KEY = "cumplo_settings_v1";
 const EXPORT_PROJECT_SCHEMA_VERSION = "cumplo.project.v2";
 const EXPORT_LIBRARY_SCHEMA_VERSION = "cumplo.projects.v2";
-const APP_VERSION = "0.8.0-beta";
+const APP_VERSION = "0.8.1-beta";
 
 const LEGACY_STATE_KEYS    = ["cumplo_state_v1", "tareas_locales_state_v1"];
 const LEGACY_SETTINGS_KEYS = ["tareas_locales_settings_v1"];
@@ -22,6 +22,8 @@ const DEFAULT_SPICE = 3;
 const MAX_DEPTH = 1;        // jerarquía de producto: Proyecto → Tareas → Subtareas
 const SAVE_DEBOUNCE_MS = 300;
 const IMPORT_MAX_BYTES = 2 * 1024 * 1024; // 2 MB: evita bloqueos por JSON enormes
+const MAX_PROJECTS = 250;   // límite de biblioteca, aplicado EN ESCRITURA (no al recargar)
+const MAX_UNDO = 30;        // instantáneas de deshacer retenidas
 const VALID_ID_RE = /^[a-z0-9][a-z0-9_.:-]{1,127}$/i;
 
 const ALLOWED_EMOJIS = new Set([
@@ -141,6 +143,87 @@ let activeGenerateController = null;
 let activeBranchController = null;
 
 // -----------------------------------------------------------------------------
+// Deshacer (0.8.1): pila de instantáneas de la biblioteca completa. Se toma una
+// instantánea antes de cada operación destructiva (aplicar una generación,
+// desglosar rama, borrar tarea o proyecto, importar). Ctrl+Z restaura la última.
+// -----------------------------------------------------------------------------
+const undoStack = [];
+
+function pushUndoSnapshot() {
+  try {
+    syncStateIntoLibrary({ touch: false });
+    undoStack.push(JSON.stringify({ library, activeId: state.id }));
+    if (undoStack.length > MAX_UNDO) undoStack.shift();
+  } catch (e) {
+    console.warn("Cumplø: no se pudo crear la instantánea de deshacer", e);
+  }
+}
+
+function performUndo() {
+  if (!undoStack.length) {
+    setStatus(TF('status.undo.empty', 'No hay nada que deshacer.'), "warn");
+    return;
+  }
+  try {
+    const snap = JSON.parse(undoStack.pop());
+    library = normalizeLibrary(snap.library);
+    if (!library.projects.length) {
+      state = newProject();
+      library.projects = [state];
+    } else {
+      state = library.projects.find(p => p.id === snap.activeId) || library.projects[0];
+    }
+    library.active_project_id = state.id;
+    uiState.descEditingId = null;
+    saveState({ touch: false });
+    render();
+    setStatus(TF('status.undo', 'Última acción deshecha.'), "ok");
+  } catch (e) {
+    console.warn("Cumplø: no se pudo deshacer", e);
+  }
+}
+
+document.addEventListener("keydown", (e) => {
+  if (!(e.ctrlKey || e.metaKey) || e.shiftKey) return;
+  if (String(e.key).toLowerCase() !== "z") return;
+  const t = e.target;
+  const tag = t && t.tagName ? t.tagName.toLowerCase() : "";
+  // No interceptar el deshacer nativo dentro de campos de texto.
+  if (tag === "input" || tag === "textarea" || (t && t.isContentEditable)) return;
+  e.preventDefault();
+  performUndo();
+});
+
+// -----------------------------------------------------------------------------
+// Preservación de foco (0.8.1): render() reconstruye el árbol entero, lo que
+// antes expulsaba el foco de teclado en cada cambio. Los controles interactivos
+// llevan data-focus-key y el foco (y la selección de texto) se restaura tras
+// reconstruir. Relevante para usuarios de teclado y lector de pantalla.
+// -----------------------------------------------------------------------------
+function captureFocus() {
+  const el = document.activeElement;
+  if (!el || !el.dataset || !el.dataset.focusKey) return null;
+  const info = { key: el.dataset.focusKey };
+  if (typeof el.selectionStart === "number") {
+    info.selStart = el.selectionStart;
+    info.selEnd = el.selectionEnd;
+  }
+  return info;
+}
+
+function restoreFocus(info) {
+  if (!info) return;
+  const el = document.querySelector(`[data-focus-key="${info.key}"]`);
+  if (!el) return;
+  try {
+    el.focus({ preventScroll: true });
+    if (typeof info.selStart === "number" && typeof el.setSelectionRange === "function") {
+      el.setSelectionRange(info.selStart, info.selEnd);
+    }
+  } catch { /* el control puede haber desaparecido */ }
+}
+
+// -----------------------------------------------------------------------------
 // Utilidades
 // -----------------------------------------------------------------------------
 function debounce(fn, ms) {
@@ -214,17 +297,54 @@ function slugForFile(value, fallback = "cumplo-project") {
     .slice(0, 70) || fallback;
 }
 
-// Acepta "baja|media|alta" y "low|medium|high"; normaliza al idioma actual.
-const ENERGY_MAP = {
-  baja: { es: 'baja', en: 'low' },     low:    { es: 'baja', en: 'low' },
-  media:{ es: 'media', en: 'medium' }, medium: { es: 'media', en: 'medium' },
-  alta: { es: 'alta', en: 'high' },    high:   { es: 'alta', en: 'high' }
+// ---------------------------------------------------------------------------
+// Valores canónicos (0.8.1): los DATOS almacenan siempre low|medium|high (o
+// cadena vacía si se desconoce) y la traducción ocurre solo al renderizar.
+// Se aceptan y migran valores heredados en español e inglés, de modo que las
+// bibliotecas antiguas y los JSON exportados en cualquier idioma importan bien.
+// ---------------------------------------------------------------------------
+const CANONICAL_ENERGY = {
+  baja: 'low',     low: 'low',
+  media: 'medium', medium: 'medium',
+  alta: 'high',    high: 'high'
 };
+const LEGACY_UNKNOWN_TIME = new Set(['sin estimación', 'no estimate']);
 
-function normalizeEnergy(value) {
-  const key = String(value || '').toLowerCase();
-  if (ENERGY_MAP[key]) return ENERGY_MAP[key][window.I18N.lang] || ENERGY_MAP[key].es;
-  return T('task.energy.unknown');
+function toCanonicalEnergy(value) {
+  const key = String(value || '').trim().toLowerCase();
+  return CANONICAL_ENERGY[key] || "";
+}
+
+function energyLabel(value) {
+  const c = toCanonicalEnergy(value);
+  if (!c) return T('task.energy.unknown');
+  return TF('energy.' + c, c);
+}
+
+function toCanonicalTime(value) {
+  const v = String(value || '').trim();
+  if (!v || LEGACY_UNKNOWN_TIME.has(v.toLowerCase())) return "";
+  return v;
+}
+
+function timeLabel(value) {
+  return value ? value : T('task.time.unknown');
+}
+
+function clampTemperature(value) {
+  // Number("") === 0: el campo vacío debe recuperar el valor por defecto.
+  if (value === "" || value === null || value === undefined) return DEFAULT_SETTINGS.temperature;
+  const n = Number(value);
+  if (!Number.isFinite(n)) return DEFAULT_SETTINGS.temperature;
+  return Math.min(2, Math.max(0, n));
+}
+
+function recommendedOllamaOrigins(origin) {
+  // Deriva la recomendación del origen real: respeta --port distinto de 8765.
+  let alt = origin;
+  if (origin.includes("127.0.0.1")) alt = origin.replace("127.0.0.1", "localhost");
+  else if (origin.includes("localhost")) alt = origin.replace("localhost", "127.0.0.1");
+  return alt === origin ? origin : `${origin},${alt}`;
 }
 
 function normalizeEmoji(value) {
@@ -250,8 +370,8 @@ function normalizeTask(task, index = 0, depth = 0) {
     title:          String(safe.title || T('prompt.newSubtask.title')).slice(0, 240),
     emoji:          normalizeEmoji(safe.emoji),
     description:    String(safe.description || "").slice(0, 1000),
-    estimated_time: String(safe.estimated_time || T('task.time.unknown')).slice(0, 80),
-    energy:         normalizeEnergy(safe.energy),
+    estimated_time: toCanonicalTime(safe.estimated_time).slice(0, 80),
+    energy:         toCanonicalEnergy(safe.energy),
     done:           Boolean(safe.done),
     collapsed:      Boolean(safe.collapsed),
     subtasks
@@ -283,7 +403,7 @@ function normalizeProject(project, opts = {}) {
     title:                String(safe.title || "").slice(0, 200),
     summary:              String(safe.summary || "").slice(0, 1000),
     category:             String(safe.category || "").slice(0, 60),
-    difficulty:           safe.difficulty ? normalizeEnergy(safe.difficulty) : "",
+    difficulty:           toCanonicalEnergy(safe.difficulty),
     estimated_total_time: String(safe.estimated_total_time || "").slice(0, 100),
     status:               normalizeStatus(safe.status),
     created_at:           created,
@@ -596,7 +716,7 @@ function renderOllamaDiagnostics() {
   if (!els.ollamaDiagnostics) return;
   const ol = window.CumploOllama;
   const origin = window.location && window.location.origin ? window.location.origin : "http://127.0.0.1:8765";
-  const recommended = "http://127.0.0.1:8765,http://localhost:8765";
+  const recommended = recommendedOllamaOrigins(origin);
   els.ollamaDiagnostics.innerHTML = "";
 
   const rows = [
@@ -629,6 +749,7 @@ function renderEphemeralToggle() {
 // Render principal
 // -----------------------------------------------------------------------------
 function render() {
+  const focusInfo = captureFocus();
   renderProjectSidebar();
 
   const total = countTasks(state.tasks);
@@ -654,6 +775,7 @@ function render() {
   els.tasksRoot.className = "tasks-root";
   els.tasksRoot.innerHTML = "";
   els.tasksRoot.appendChild(renderTaskList(state.tasks, 0));
+  restoreFocus(focusInfo);
 }
 
 function renderProjectSidebar() {
@@ -753,7 +875,7 @@ function renderMeta() {
   const items = [
     [TF('meta.project', 'Proyecto'), displayProjectTitle(state)],
     [T('meta.category'), state.category || "—"],
-    [T('meta.difficulty'), state.difficulty || T('task.energy.unknown')],
+    [T('meta.difficulty'), state.difficulty ? energyLabel(state.difficulty) : T('task.energy.unknown')],
     [T('meta.totalTime'), state.estimated_total_time || T('task.time.unknown')]
   ];
 
@@ -835,6 +957,7 @@ function renderTaskItem(task, depth = 0) {
   checkbox.type = "checkbox";
   checkbox.className = "task-checkbox";
   checkbox.checked = task.done;
+  checkbox.dataset.focusKey = "check:" + task.id;
   checkbox.title = T('task.check.aria');
   checkbox.setAttribute("aria-label", T('task.check.aria'));
   checkbox.addEventListener("change", () => {
@@ -847,6 +970,7 @@ function renderTaskItem(task, depth = 0) {
   toggle.type = "button";
   toggle.className = "toggle-btn";
   toggle.textContent = task.collapsed ? "+" : "−";
+  toggle.dataset.focusKey = "toggle:" + task.id;
   toggle.title = task.collapsed ? T('task.action.expand') : T('task.action.collapse');
   toggle.setAttribute("aria-expanded", String(!task.collapsed));
   toggle.disabled = !(task.subtasks && task.subtasks.length);
@@ -871,6 +995,7 @@ function renderTaskItem(task, depth = 0) {
   title.className = "task-title";
   title.setAttribute("aria-label", depth === 0 ? T('task.title.aria') : TF('subtask.title.aria', 'Título de la subtarea'));
   title.value = task.title;
+  title.dataset.focusKey = "title:" + task.id;
   title.maxLength = 240;
   title.addEventListener("input", () => {
     task.title = title.value.slice(0, 240);
@@ -890,11 +1015,11 @@ function renderTaskItem(task, depth = 0) {
 
   const time = document.createElement("span");
   time.className = "pill";
-  time.textContent = T('task.time', { value: task.estimated_time || T('task.time.unknown') });
+  time.textContent = T('task.time', { value: timeLabel(task.estimated_time) });
 
   const energy = document.createElement("span");
   energy.className = "pill";
-  energy.textContent = T('task.energy', { value: task.energy || T('task.energy.unknown') });
+  energy.textContent = T('task.energy', { value: energyLabel(task.energy) });
 
   details.append(time, energy);
   content.append(titleRow, descContainer, details);
@@ -912,8 +1037,8 @@ function renderTaskItem(task, depth = 0) {
         title: T('prompt.newSubtask.title'),
         emoji: "📝",
         description: "",
-        estimated_time: T('task.time.unknown'),
-        energy: T('task.energy.unknown'),
+        estimated_time: "",
+        energy: "",
         done: false,
         collapsed: false,
         subtasks: []
@@ -932,6 +1057,7 @@ function renderTaskItem(task, depth = 0) {
 
   const deleteBtn = smallButton(T('task.action.delete'), () => {
     if (confirm(T('confirm.deleteTask'))) {
+      pushUndoSnapshot();
       removeTaskById(state.tasks, task.id);
       saveState();
       render();
@@ -1057,6 +1183,10 @@ function selectProject(id) {
 
 function createBlankProject() {
   syncStateIntoLibrary({ touch: false });
+  if (library.projects.length >= MAX_PROJECTS) {
+    setStatus(TF('status.library.limit', 'Has alcanzado el límite de {max} proyectos.', { max: MAX_PROJECTS }), "error");
+    return;
+  }
   state = newProject({ title: "" });
   library.projects.unshift(state);
   library.active_project_id = state.id;
@@ -1082,6 +1212,10 @@ function renameActiveProject() {
 
 function duplicateActiveProject() {
   syncStateIntoLibrary({ touch: false });
+  if (library.projects.length >= MAX_PROJECTS) {
+    setStatus(TF('status.library.limit', 'Has alcanzado el límite de {max} proyectos.', { max: MAX_PROJECTS }), "error");
+    return;
+  }
   const copy = clone(state);
   const n = nowIso();
   copy.id = uid("project");
@@ -1107,6 +1241,7 @@ function toggleArchiveActiveProject() {
 
 function deleteActiveProject() {
   if (!confirm(TF('confirm.deleteProject', '¿Borrar este proyecto y todas sus tareas y subtareas? Esta acción no se puede deshacer.'))) return;
+  pushUndoSnapshot();
   const id = state.id;
   library.projects = library.projects.filter(p => p.id !== id);
   if (!library.projects.length) library.projects.push(newProject());
@@ -1153,7 +1288,7 @@ function projectToMarkdown(project = state) {
   if (project.category)             lines.push("", `${T('meta.category')}: ${project.category}`);
   if (project.summary)              lines.push("", project.summary);
   if (project.estimated_total_time) lines.push("", `${T('meta.totalTime')}: ${project.estimated_total_time}`);
-  if (project.difficulty)           lines.push(`${T('meta.difficulty')}: ${project.difficulty}`);
+  if (project.difficulty)           lines.push(`${T('meta.difficulty')}: ${energyLabel(project.difficulty)}`);
   lines.push("");
 
   function walk(tasks, depth = 0) {
@@ -1163,7 +1298,7 @@ function projectToMarkdown(project = state) {
       lines.push(`${indent}- [${task.done ? "x" : " "}] ${emoji}${task.title}`);
       if (task.description)    lines.push(`${indent}  - ${task.description}`);
       if (task.estimated_time) lines.push(`${indent}  - ${T('meta.totalTime')}: ${task.estimated_time}`);
-      if (task.energy)         lines.push(`${indent}  - ${T('task.energy', { value: task.energy })}`);
+      if (task.energy)         lines.push(`${indent}  - ${T('task.energy', { value: energyLabel(task.energy) })}`);
       walk(task.subtasks || [], depth + 1);
     }
   }
@@ -1186,13 +1321,22 @@ function downloadText(filename, content, mime) {
 
 function importPayload(payload) {
   syncStateIntoLibrary({ touch: false });
-  let imported = [];
+  let candidates = [];
 
   if (payload && typeof payload === "object" && Array.isArray(payload.projects)) {
-    imported = payload.projects.slice(0, 250).map(p => normalizeProject(p));
+    candidates = payload.projects.slice(0, MAX_PROJECTS).map(p => normalizeProject(p));
   } else {
-    imported = [normalizeProject(extractProjectFromImport(payload))];
+    candidates = [normalizeProject(extractProjectFromImport(payload))];
   }
+
+  // El límite de la biblioteca se aplica EN ESCRITURA. Antes el exceso se
+  // truncaba silenciosamente al recargar la página (pérdida de datos diferida
+  // e invisible); ahora se importa hasta el hueco disponible y se informa.
+  const slots = Math.max(0, MAX_PROJECTS - library.projects.length);
+  const total = candidates.length;
+  const imported = candidates.slice(0, slots);
+
+  pushUndoSnapshot();
 
   const existingIds = new Set(library.projects.map(p => p.id));
   for (const project of imported) {
@@ -1203,9 +1347,12 @@ function importPayload(payload) {
     project.updated_at = nowIso();
     library.projects.unshift(project);
   }
-  state = imported[0];
-  library.active_project_id = state.id;
+  if (imported.length) {
+    state = imported[0];
+    library.active_project_id = state.id;
+  }
   saveState({ touch: false });
+  return { added: imported.length, total };
 }
 
 // -----------------------------------------------------------------------------
@@ -1251,7 +1398,7 @@ async function runBranchExpansion() {
   setStatus(T('status.branch.start'));
 
   try {
-    const raw = await window.CumploOllama.chat({
+    const parsed = await requestPlanJson({
       system: buildSystemPromptBranch(lang),
       user: buildBranchUserPrompt({
         parentTitle: target.title,
@@ -1260,13 +1407,14 @@ async function runBranchExpansion() {
         profile: els.profileSelect.value,
         lang
       }),
-      options: { temperature: Number(settings.temperature) },
+      schema: buildBranchSchema(),
+      temperature: clampTemperature(settings.temperature),
       signal: activeBranchController.signal
     });
-    const parsed = extractJson(raw);
     const newSubs = normalizeBranch(parsed);
     if (!newSubs.length) throw new Error(T('err.parser.noSubs'));
 
+    pushUndoSnapshot();
     if (replace) target.subtasks = newSubs;
     else target.subtasks = (target.subtasks || []).concat(newSubs);
     target.collapsed = false;
@@ -1283,6 +1431,51 @@ async function runBranchExpansion() {
   } finally {
     activeBranchController = null;
     setBranchBusy(false);
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Generación estructurada (0.8.1): streaming con progreso, JSON Schema como
+// gramática de salida (con degradación automática en ollama.js si la versión
+// local no lo soporta) y un único reintento de reparación si el JSON no parsea.
+// -----------------------------------------------------------------------------
+const PROGRESS_THROTTLE_MS = 250;
+
+function makeProgressReporter() {
+  let last = 0;
+  return ({ chars }) => {
+    const now = Date.now();
+    if (now - last < PROGRESS_THROTTLE_MS) return;
+    last = now;
+    setStatus(TF('status.generating.progress', 'Generando desglose… {chars} caracteres recibidos.', { chars }));
+  };
+}
+
+async function requestPlanJson({ system, user, schema, temperature, signal }) {
+  const onProgress = makeProgressReporter();
+  let raw = await window.CumploOllama.chat({
+    system, user,
+    options: { temperature },
+    format: schema,
+    signal,
+    onProgress
+  });
+  try {
+    return extractJson(raw);
+  } catch (parseError) {
+    if (signal && signal.aborted) throw parseError;
+    // Un único reintento con instrucción reforzada y temperatura 0. Resuelve
+    // la mayoría de fallos de formato de los modelos pequeños sin molestar.
+    setStatus(TF('status.repairRetry', 'La respuesta del modelo no era JSON válido. Reintentando una vez…'), "warn");
+    raw = await window.CumploOllama.chat({
+      system,
+      user: user + "\n\nIMPORTANT: Your previous reply was not valid JSON. Reply again with ONLY the JSON object described in the system prompt. No prose, no Markdown, no code fences.",
+      options: { temperature: 0 },
+      format: schema,
+      signal,
+      onProgress
+    });
+    return extractJson(raw);
   }
 }
 
@@ -1306,6 +1499,14 @@ async function runGenerate() {
   if (!projectText) { setStatus(T('status.error.empty'), "error"); return; }
   if (projectText.length > 2000) { setStatus(T('status.error.tooLong'), "error"); return; }
 
+  // Antes, regenerar sustituía en silencio un proyecto con contenido: la
+  // pérdida de datos más probable de toda la aplicación. Ahora se confirma
+  // y, en cualquier caso, queda instantánea para Ctrl+Z.
+  if (projectHasContent(state) && !confirm(TF('confirm.overwriteGenerate',
+      'Este proyecto ya tiene contenido. El nuevo desglose lo sustituirá por completo. ¿Continuar? Podrás deshacerlo con Ctrl+Z.'))) {
+    return;
+  }
+
   const settings = loadSettings();
   const lang = window.I18N.lang;
   const previous = state;
@@ -1314,13 +1515,14 @@ async function runGenerate() {
   setStatus(T('status.generating'));
 
   try {
-    const raw = await window.CumploOllama.chat({
+    const parsed = await requestPlanJson({
       system: buildSystemPrompt(lang),
       user: buildUserPrompt({ task: projectText, spice: uiState.spice, profile: els.profileSelect.value, lang }),
-      options: { temperature: Number(settings.temperature) },
+      schema: buildProjectSchema(),
+      temperature: clampTemperature(settings.temperature),
       signal: activeGenerateController.signal
     });
-    const parsed = extractJson(raw);
+    pushUndoSnapshot();
     const n = nowIso();
     state = normalizeProject({
       ...parsed,
@@ -1360,16 +1562,16 @@ els.addManualBtn.addEventListener("click", () => {
     state.title = TF('projects.manualTitle', 'Proyecto manual');
     state.summary = "";
     state.category = "—";
-    state.difficulty = T('task.energy.unknown');
-    state.estimated_total_time = T('task.time.unknown');
+    state.difficulty = "";
+    state.estimated_total_time = "";
   }
   state.tasks.push({
     id: uid("task"),
     title: title.slice(0, 240),
     emoji: "📝",
     description: "",
-    estimated_time: T('task.time.unknown'),
-    energy: T('task.energy.unknown'),
+    estimated_time: "",
+    energy: "",
     done: false,
     collapsed: false,
     subtasks: []
@@ -1445,10 +1647,15 @@ els.dlgImportInput.addEventListener("change", async event => {
     }
     const text = await file.text();
     const parsed = JSON.parse(text);
-    importPayload(parsed);
+    const result = importPayload(parsed);
     render();
     els.exportDialog.close();
-    setStatus(T('status.imported'), "ok");
+    if (result.added < result.total) {
+      setStatus(TF('status.library.full', 'Biblioteca llena: se han importado {added} de {total} proyectos (límite: {max}).',
+                   { added: result.added, total: result.total, max: MAX_PROJECTS }), "warn");
+    } else {
+      setStatus(T('status.imported'), "ok");
+    }
   } catch (error) {
     setStatus(T('status.import.error', { message: error.message }), "error");
   } finally {
@@ -1519,7 +1726,7 @@ els.saveSettingsBtn.addEventListener("click", () => {
   const currentSettings = loadSettings();
   saveSettings({
     ...currentSettings,
-    temperature: Number(els.temperatureInput.value || DEFAULT_SETTINGS.temperature)
+    temperature: clampTemperature(els.temperatureInput.value)
   });
   const chosen = els.modelSelect.value;
   if (chosen) window.CumploOllama.setActiveModel(chosen);
@@ -1631,6 +1838,35 @@ async function loadFooterVersion() {
     if (data && data.version) els.footerVersion.textContent = "v" + data.version;
   } catch {}
 }
+
+// Sincronización multi-pestaña (0.8.1): localStorage es last-write-wins entre
+// pestañas; sin esto, dos pestañas abiertas se pisaban los datos en silencio.
+// Se recarga la biblioteca desde el almacenamiento SIN volver a escribirla
+// (escribir aquí provocaría un bucle de eventos storage entre pestañas).
+window.addEventListener("storage", (e) => {
+  if (e.key !== PROJECTS_STORAGE_KEY || isEphemeralMode()) return;
+  if (activeGenerateController || activeBranchController) return;
+  try {
+    const raw = localStorage.getItem(PROJECTS_STORAGE_KEY);
+    if (!raw) return;
+    const previousId = state.id;
+    library = normalizeLibrary(JSON.parse(raw));
+    if (!library.projects.length) {
+      state = newProject();
+      library.projects = [state];
+    } else {
+      state = library.projects.find(p => p.id === previousId)
+           || library.projects.find(p => p.id === library.active_project_id)
+           || library.projects[0];
+    }
+    library.active_project_id = state.id;
+    uiState.descEditingId = null;
+    render();
+    setStatus(TF('status.externalUpdate', 'La biblioteca ha cambiado en otra pestaña y se ha recargado aquí.'), "warn");
+  } catch (err) {
+    console.warn("Cumplø: no se pudo sincronizar desde otra pestaña", err);
+  }
+});
 
 // Boot
 window.I18N.apply();

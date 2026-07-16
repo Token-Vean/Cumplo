@@ -266,7 +266,21 @@
       'err.parser.noJson':        'El modelo no devolvió JSON válido.',
       'err.parser.noSubs':        'El modelo no devolvió subtareas utilizables.',
       'err.import.tooLarge':      'El archivo supera el límite de {mb} MB.',
-      'err.unknown':              'Error desconocido al comunicarse con Ollama.'
+      'err.unknown':              'Error desconocido al comunicarse con Ollama.',
+
+      // 0.8.1 — valores canónicos, deshacer, streaming y límites
+      'energy.low':               'baja',
+      'energy.medium':            'media',
+      'energy.high':              'alta',
+      'status.undo':              'Última acción deshecha.',
+      'status.undo.empty':        'No hay nada que deshacer.',
+      'confirm.overwriteGenerate':'Este proyecto ya tiene contenido. El nuevo desglose lo sustituirá por completo. ¿Continuar? Podrás deshacerlo con Ctrl+Z.',
+      'status.generating.progress':'Generando desglose… {chars} caracteres recibidos.',
+      'status.repairRetry':       'La respuesta del modelo no era JSON válido. Reintentando una vez…',
+      'status.library.full':      'Biblioteca llena: se han importado {added} de {total} proyectos (límite: {max}).',
+      'status.library.limit':     'Has alcanzado el límite de {max} proyectos. Exporta o elimina proyectos antes de crear más.',
+      'status.externalUpdate':    'La biblioteca ha cambiado en otra pestaña y se ha recargado aquí.',
+      'err.responseTooLarge':     'La respuesta del modelo supera el tamaño máximo permitido. Prueba con un nivel de desglose menor.'
     },
 
     en: {
@@ -511,7 +525,21 @@
       'err.parser.noJson':        'The model did not return valid JSON.',
       'err.parser.noSubs':        'The model did not return usable subtasks.',
       'err.import.tooLarge':      'The file exceeds the {mb} MB limit.',
-      'err.unknown':              'Unknown error while talking to Ollama.'
+      'err.unknown':              'Unknown error while talking to Ollama.',
+
+      // 0.8.1 — canonical values, undo, streaming and limits
+      'energy.low':               'low',
+      'energy.medium':            'medium',
+      'energy.high':              'high',
+      'status.undo':              'Last action undone.',
+      'status.undo.empty':        'Nothing to undo.',
+      'confirm.overwriteGenerate':'This project already has content. The new breakdown will replace it entirely. Continue? You can undo with Ctrl+Z.',
+      'status.generating.progress':'Generating breakdown… {chars} characters received.',
+      'status.repairRetry':       'The model response was not valid JSON. Retrying once…',
+      'status.library.full':      'Library full: imported {added} of {total} projects (limit: {max}).',
+      'status.library.limit':     'You have reached the limit of {max} projects. Export or delete projects before creating more.',
+      'status.externalUpdate':    'The library changed in another tab and has been reloaded here.',
+      'err.responseTooLarge':     'The model response exceeds the maximum allowed size. Try a lower breakdown level.'
     }
   };
 

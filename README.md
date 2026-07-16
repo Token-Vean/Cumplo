@@ -6,7 +6,7 @@
 
 Cumplø es una herramienta local, sin nube, para descomponer **proyectos** en **tareas** y **subtareas** accionables usando un modelo de lenguaje ejecutado en este mismo equipo a través de [Ollama](https://ollama.com). Forma parte de una suite local-first orientada a trabajo profesional, planificación y productividad con IA local.
 
-**Versión: 0.8.0-beta** · Beta pública.
+**Versión: 0.8.1-beta** · Beta pública.
 
 ## Filosofía
 
@@ -79,14 +79,14 @@ El primer arranque solo levanta el servidor local en `127.0.0.1:8765` y abre el 
 ```json
 {
   "schema_version": "cumplo.project.v2",
-  "app_version": "0.8.0-beta",
+  "app_version": "0.8.1-beta",
   "exported_at": "2026-05-12T00:00:00.000Z",
   "project": {
     "id": "project_...",
     "title": "string",
     "summary": "string",
     "category": "string corta",
-    "difficulty": "baja | media | alta",
+    "difficulty": "low | medium | high",
     "estimated_total_time": "string",
     "status": "active | archived",
     "created_at": "ISO-8601",
@@ -98,7 +98,7 @@ El primer arranque solo levanta el servidor local en `127.0.0.1:8765` y abre el 
         "emoji": "string (un solo emoji)",
         "description": "string",
         "estimated_time": "string",
-        "energy": "baja | media | alta",
+        "energy": "low | medium | high",
         "done": false,
         "subtasks": [
           {
@@ -107,7 +107,7 @@ El primer arranque solo levanta el servidor local en `127.0.0.1:8765` y abre el 
             "emoji": "string (un solo emoji)",
             "description": "string",
             "estimated_time": "string",
-            "energy": "baja | media | alta",
+            "energy": "low | medium | high",
             "done": false,
             "subtasks": []
           }
@@ -120,7 +120,7 @@ El primer arranque solo levanta el servidor local en `127.0.0.1:8765` y abre el 
 
 Cumplø es tolerante con proyectos que no traigan `emoji`, `category`, `status` o metadatos temporales: asigna valores por defecto. La profundidad funcional admitida es **dos niveles bajo proyecto**: tareas y subtareas. Los identificadores internos de proyectos, tareas y subtareas se verifican y se regeneran cuando faltan, son inválidos o están duplicados.
 
-## Seguridad (endurecida hasta 0.8.0-beta)
+## Seguridad (endurecida hasta 0.8.1-beta)
 
 - Servidor solo en `127.0.0.1` (no expuesto a la red).
 - **Validación de Host** en todas las respuestas: mitiga DNS rebinding.

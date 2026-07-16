@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.8.1-beta — Seguridad, datos canónicos y robustez de generación
+
+### Seguridad
+
+- El servidor nunca sirve rutas ocultas: cualquier segmento que empiece por punto (`.git/`, `.env`, `.gitignore`…) devuelve 404, aunque exista en el directorio de instalación.
+- Las peticiones **HEAD** pasan ahora por la misma validación de Host que GET y POST; antes eludían la mitigación de DNS rebinding.
+- Eliminado `os.chdir()`: el directorio raíz se inyecta en el handler (`directory=`), de modo que el proceso no retiene la carpeta de instalación en Windows.
+- `Cache-Control: no-cache` en los estáticos: tras actualizar Cumplø, el navegador revalida `app.js`/`index.html` en lugar de servir versiones antiguas cacheadas.
+- Límite duro de 2.000.000 de caracteres a la respuesta del modelo: una generación desbocada se aborta en vez de bloquear la pestaña en `JSON.parse`.
+- La temperatura se valida y acota a `[0, 2]`; entradas vacías o no numéricas recuperan el valor por defecto en lugar de propagar `NaN` u `0` involuntarios.
+
+### Añadido
+
+- **Generación en streaming**: la interfaz muestra el progreso (caracteres recibidos) y el timeout pasa a ser de inactividad (2 min sin datos nuevos) en lugar de un tope global arbitrario.
+- **Salida estructurada**: la petición a Ollama incluye un JSON Schema (`format`) que restringe la generación al esquema esperado. Si la versión local de Ollama no lo soporta (HTTP 400), se reintenta automáticamente sin él.
+- **Reintento de reparación**: si la respuesta no parsea como JSON, se reintenta una única vez con temperatura 0 e instrucción reforzada antes de mostrar error.
+- **Deshacer (Ctrl+Z)**: hasta 30 instantáneas de la biblioteca, tomadas antes de aplicar una generación, desglosar una rama, borrar una tarea o proyecto e importar.
+- **Confirmación al regenerar**: descomponer sobre un proyecto que ya tiene contenido pide confirmación en lugar de sustituirlo en silencio.
+- **Sincronización multi-pestaña**: si otra pestaña guarda cambios, la biblioteca se recarga aquí en lugar de pisarse mutuamente (last-write-wins silencioso).
+- **Preservación de foco**: al re-renderizar, el foco de teclado y la selección de texto se restauran (checkboxes, títulos, plegado). Relevante para uso con teclado y lector de pantalla.
+- **Suite de tests** sin dependencias (`node --test tests/`), integrada en el workflow de CI.
+
+### Cambiado
+
+- **Valores canónicos**: `energy` y `difficulty` se almacenan siempre como `low | medium | high` (o vacío si se desconoce) y se traducen únicamente al renderizar y exportar a Markdown. Los datos heredados en español o inglés migran automáticamente al cargar o importar. Esto elimina la mezcla de idiomas en bibliotecas usadas alternando ES/EN.
+- El límite de 250 proyectos se aplica **en escritura** (importar, crear, duplicar) con aviso explícito; antes el exceso se truncaba en silencio al recargar la página.
+- La recomendación de `OLLAMA_ORIGINS` del panel de diagnóstico se deriva del origen real de la página, por lo que es correcta también al arrancar con `--port` distinto de 8765.
+
 ## 0.8.0-beta — Gestión local de proyectos
 
 ### Añadido
