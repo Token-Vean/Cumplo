@@ -160,7 +160,7 @@ cumplo/
 ├── server.py         # servidor local con seguridad endurecida
 ├── start.sh          # arranque Linux/macOS
 ├── start.bat         # arranque Windows
-├── LICENSE           # MIT
+├── LICENSE           # AGPL-3.0
 ├── SECURITY.md
 ├── README.md
 ├── CHANGELOG.md
@@ -188,4 +188,8 @@ Todas comparten: arquitectura local, sin telemetría, sin nube, CSP estricta y c
 
 ## Licencia
 
-[MIT](LICENSE) — Copyright (c) 2026 Víctor Villapalos Pardiñas.
+Cumplø se distribuye bajo la **GNU Affero General Public License v3 o posterior** (AGPL-3.0-or-later), como el resto de la suite. Ver [`LICENSE`](LICENSE).
+
+Copyright (C) 2026 Víctor Villapalos Pardiñas.
+
+Las versiones publicadas hasta la 0.8.8 se distribuyeron bajo licencia MIT y conservan esa licencia.

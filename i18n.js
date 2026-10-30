@@ -247,7 +247,7 @@
       'shutdown.message':         'Puedes cerrar esta pestaña. El servidor local se ha detenido.',
 
       // Footer
-      'footer.tagline':           'Local · Sin nube · MIT',
+      'footer.tagline':           'Local · Sin nube · AGPL-3.0',
 
       // Ollama errors (used from ollama.js)
       'err.aborted.generate':     'La generación local ha superado el tiempo máximo. Prueba con un modelo más ligero, reduce la tarea de entrada o vuelve a intentarlo.',
@@ -506,7 +506,7 @@
       'shutdown.message':         'You can close this tab. The local server has been stopped.',
 
       // Footer
-      'footer.tagline':           'Local · No cloud · MIT',
+      'footer.tagline':           'Local · No cloud · AGPL-3.0',
 
       // Ollama errors
       'err.aborted.generate':     'Local generation exceeded the time limit. Try a lighter model, shorten the input task or retry.',
