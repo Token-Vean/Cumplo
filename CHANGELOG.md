@@ -1,5 +1,11 @@
 # Changelog
 
+## Sin publicar
+
+### Licencia
+
+- Cumplø pasa de MIT a **AGPL-3.0-or-later**, la misma licencia que el resto de la suite Token&Vean. `LICENSE` contiene el texto íntegro de la AGPL-3.0 y el pie de la interfaz lo indica. Las versiones publicadas hasta la 0.8.8 se distribuyeron bajo MIT y conservan esa licencia.
+
 ## 0.8.1-beta — Seguridad, datos canónicos y robustez de generación
 
 ### Seguridad
