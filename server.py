@@ -14,6 +14,8 @@ Patrón derivado de Compo v0.1.13, endurecido hasta 0.8.1-beta:
   Cross-Origin-Opener-Policy, Cross-Origin-Resource-Policy.
 - Bloqueo de rutas ocultas: nunca se sirven ficheros ni directorios cuyo
   nombre empiece por punto (.git, .env, .gitignore, etc.).
+  La comprobación se hace sobre la ruta decodificada y sobre la ruta real
+  en disco: antes `/%2egit/config` eludía el filtro.
 - `Cache-Control: no-cache` en los estáticos para que las actualizaciones
   de la aplicación no queden atrapadas en la caché del navegador.
 - Sin `os.chdir()`: el directorio raíz se pasa al handler, de modo que el
@@ -28,11 +30,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import posixpath
 import sys
 import threading
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import unquote
 
 __version__ = "0.8.1-beta"
 
@@ -92,9 +97,42 @@ def _has_hidden_segment(path: str) -> bool:
     /docs/.secreto, /.env… Estas rutas nunca se sirven, aunque existan en
     el directorio raíz (defensa en profundidad frente a residuos de
     desarrollo empaquetados por error).
+
+    Se evalúa sobre la ruta YA DECODIFICADA, igual que hace después
+    ``translate_path``. Comprobar la ruta cruda permitía eludir el bloqueo
+    con codificación porcentual: ``/%2egit/config`` no empieza por punto
+    como texto, pero se resuelve a ``.git/config``.
     """
-    clean = path.split("?", 1)[0].split("#", 1)[0]
+    raw = path.split("?", 1)[0].split("#", 1)[0]
+    try:
+        decoded = unquote(raw, errors="surrogatepass")
+    except UnicodeDecodeError:
+        decoded = unquote(raw)
+    decoded = decoded.replace("\\", "/")
+    clean = posixpath.normpath(decoded)
     return any(segment.startswith(".") for segment in clean.split("/") if segment)
+
+
+def _fs_path_is_hidden_or_outside(fs_path: str, root: str) -> bool:
+    """
+    True si la ruta REAL en disco sale de ``root`` o toca un dotfile.
+
+    Defensa en profundidad sobre la ruta ya resuelta por el sistema de
+    ficheros: cubre alias que la comprobación textual no ve, como los
+    nombres cortos 8.3 de Windows (``GIT~1`` es ``.git``) o enlaces
+    simbólicos que apunten fuera de la carpeta de la aplicación.
+    """
+    try:
+        real = os.path.realpath(fs_path)
+        rel = os.path.relpath(real, os.path.realpath(root))
+    except (OSError, ValueError):
+        return True
+    if rel == os.curdir:
+        return False
+    parts = rel.split(os.sep)
+    if parts[0] == os.pardir:
+        return True
+    return any(part.startswith(".") for part in parts if part)
 
 
 class CumploServer(ThreadingHTTPServer):
@@ -166,7 +204,17 @@ class CumploHandler(SimpleHTTPRequestHandler):
         if _has_hidden_segment(self.path):
             self.send_error(404, "Not found")
             return False
+        # Misma regla sobre la ruta real en disco (alias 8.3, enlaces).
+        if _fs_path_is_hidden_or_outside(self.translate_path(self.path), self.directory):
+            self.send_error(404, "Not found")
+            return False
         return True
+
+    def list_directory(self, path):  # noqa: ANN001
+        # Nunca se listan directorios: una carpeta sin index.html devuelve
+        # 404 en lugar de enumerar su contenido (igual que Compo).
+        self.send_error(404, "Not found")
+        return None
 
     def do_GET(self) -> None:  # noqa: N802
         if not self._static_guard():

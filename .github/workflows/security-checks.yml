@@ -53,6 +53,31 @@ jobs:
         run: |
           bandit -r . -x ./.git,./dist,./build,./__pycache__ -ll
 
+      - name: Check local server hardening (Host, dotfiles)
+        run: |
+          python server.py --port 18765 > server.log 2>&1 &
+          SERVER_PID=$!
+          for i in $(seq 1 30); do
+            curl -s -o /dev/null http://127.0.0.1:18765/index.html && break
+            sleep 0.5
+          done
+          code() { curl -s -o /dev/null -w "%{http_code}" "$@"; }
+          expect() {
+            if [ "$1" != "$2" ]; then echo "FAIL: $3 -> $1 (expected $2)"; cat server.log; exit 1; fi
+            echo "ok: $3 -> $1"
+          }
+          expect "$(code http://127.0.0.1:18765/index.html)" 200 "GET with local Host"
+          expect "$(code http://127.0.0.1:18765/app.js)" 200 "regular static file"
+          expect "$(code -H 'Host: evil.example' http://127.0.0.1:18765/index.html)" 421 "GET with foreign Host"
+          expect "$(code -I -H 'Host: evil.example' http://127.0.0.1:18765/index.html)" 421 "HEAD with foreign Host"
+          expect "$(code http://127.0.0.1:18765/.git/config)" 404 "dotfile path"
+          expect "$(code http://127.0.0.1:18765/%2egit/config)" 404 "dotfile path, percent-encoded"
+          expect "$(code http://127.0.0.1:18765/%2Egit/HEAD)" 404 "dotfile path, percent-encoded uppercase"
+          expect "$(code http://127.0.0.1:18765/%2egitignore)" 404 "dotfile file, percent-encoded"
+          expect "$(code http://127.0.0.1:18765/assets/%2e%2e/%2egit/config)" 404 "dotfile path, encoded traversal"
+          expect "$(code http://127.0.0.1:18765/assets/)" 404 "directory listing disabled"
+          kill "$SERVER_PID" || true
+
       - name: Check unwanted external references
         run: |
           TERM_A="$(printf '\x67\x6f\x62\x6c\x69\x6e')"
